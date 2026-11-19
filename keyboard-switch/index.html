@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cherry MX Red teardown</title>
+<style>
+  html, body { margin: 0; background: #0b0d10; color: #dfe4ea; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 12px; }
+  canvas { display: block; width: 100%; height: auto; border-radius: 10px; background: #0f1216; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  button { background: #1b2027; color: #dfe4ea; border: 1px solid #343c47; border-radius: 8px; padding: 8px 12px; font: 600 14px system-ui, sans-serif; cursor: pointer; }
+  button:hover { border-color: #5fd0ff; }
+  button.on { background: #12324a; border-color: #5fd0ff; color: #fff; }
+  button.accent { background: #3a1416; border-color: #d8262e; }
+  button.tour { background: #13301f; border-color: #3fbf6f; }
+  .slider { display: flex; align-items: center; gap: 8px; margin-left: auto; font: 600 13px system-ui, sans-serif; color: #9aa7b4; }
+  input[type=range] { width: 180px; accent-color: #d8262e; }
+  .hint { color: #6f7a86; font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="cv"></canvas>
+  <div class="controls">
+    <button data-part="top">Housing top</button>
+    <button data-part="stem">Stem</button>
+    <button data-part="spring">Spring</button>
+    <button data-part="leaves">Contact leaves</button>
+    <button data-part="bottom">Housing bottom</button>
+    <button id="btnPress" class="accent">Press</button>
+    <button id="btnAssemble">Reassemble</button>
+    <button id="btnTour" class="tour">Auto tour (10 s)</button>
+    <label class="slider">Travel <input id="slider" type="range" min="0" max="4" step="0.01" value="0"> <span id="sv">0.00 mm</span></label>
+  </div>
+  <div class="hint">Add #t=4.2 to the URL to draw that moment of the auto tour (deterministic, 0 to 10 s).</div>
+</div>
+<script>
+"use strict";
+// ---------- Cherry MX Red numbers (Cherry datasheet) ----------
+const PRE = 2.0;          // pre-travel to actuation, mm (spec 2.0 +/- 0.6)
+const TOTAL = 4.0;        // total travel, mm (spec 4.0 -0.4)
+const F_OP = 45;          // operating force at actuation, cN
+// Linear spring between the spec point: fit 30 cN at rest -> 60 cN at bottom-out (approximate)
+const F_REST = 30;
+const K = (F_OP - F_REST) / PRE;          // cN per mm = 7.5
+function force(d) { return F_REST + K * d; }
+
+// ---------- geometry (mm, y up, origin = PCB surface, cross-section) ----------
+const FLOOR = 1.0, REST_TOP = 7.0;               // spring seat and stem underside at rest
+const FREE = REST_TOP - FLOOR + F_REST / K;      // spring free length from the same formula (10 mm)
+const GAP = 0.7;                                 // contact gap when the stem leg holds the leaf open
+function gapAt(d) { return d >= PRE ? 0 : GAP * clamp((PRE - d) / 0.5, 0, 1); }
+function closed(d) { return gapAt(d) === 0; }
+
+const PARTS = [
+  { id: "top",    name: "Housing top",    note: "Guides the stem, snaps onto the bottom", dx: -19, dy: 13, label: [0, 12.6], side: "above" },
+  { id: "stem",   name: "Stem",           note: "Red = linear: no bump, no click", dx: 0, dy: 20, label: [0, 16.2], side: "above" },
+  { id: "spring", name: "Spring",         note: "30 cN at rest, 45 cN at 2 mm, ~60 cN at 4 mm", dx: 19, dy: 12, label: [0, FLOOR + FREE + 1.0], side: "above" },
+  { id: "leaves", name: "Contact leaves", note: "Gold crosspoint, close at 2.0 mm", dx: 21, dy: 0, label: [-4.9, -4.6], side: "below" },
+  { id: "bottom", name: "Housing bottom", note: "Holds spring + leaves, center post", dx: -19, dy: 0, label: [0, -4.6], side: "below" }
+];
+const ORDER = PARTS.map(p => p.id);
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function ease(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+function seg(t, a, b) { return ease((t - a) / (b - a)); }
+function lerp(a, b, k) { return a + (b - a) * k; }
+
+// ---------- the auto tour: pure function of t ----------
+const TOUR_LEN = 10;
+function tourState(t) {
+  t = clamp(t, 0, TOUR_LEN);
+  const back = seg(t, 6.2, 7.0);
+  const ex = {};
+  ORDER.forEach((id, i) => { const a = 0.8 + i; ex[id] = seg(t, a, a + 0.8) * (1 - back); });
+  let d = 0;
+  if (t >= 7.2) d = TOTAL * seg(t, 7.2, 8.6);
+  if (t >= 9.2) d = TOTAL * (1 - seg(t, 9.2, 9.9));
+  let focus = null, caption, sub = "";
+  if (t < 0.8) { caption = "Cherry MX Red, assembled"; sub = "Cross-section. Next: pull it apart, part by part."; }
+  else if (t < 5.8) {
+    const i = Math.min(4, Math.floor(t - 0.8)); const p = PARTS[i];
+    focus = p.id; caption = (i + 1) + "/5  " + p.name; sub = p.note;
+  }
+  else if (t < 6.2) { caption = "All five parts"; sub = "Housing top, stem, spring, contact leaves, housing bottom."; }
+  else if (t < 7.2) { caption = "Back together"; sub = "Now press the key."; }
+  else if (t < 9.2) {
+    if (d >= TOTAL - 0.01) { caption = "Bottom-out at 4.0 mm"; sub = "Already fired 2 mm ago. The rest is overtravel."; }
+    else if (closed(d)) { caption = "Fires at 2.0 mm, 45 cN"; sub = "The stem leg slides past the leaf and the gold contacts touch."; }
+    else { caption = "Pressing: contacts open"; sub = "The stem leg still holds the moving leaf away."; }
+  }
+  else { caption = closed(d) ? "Release: still closed" : "Release: contacts open again"; sub = "They open as soon as travel drops below 2.0 mm."; }
+  return { ex, d, focus, caption, sub, t };
+}
+
+// ---------- canvas ----------
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 1200, H = 680, R = 2;
+cv.width = W * R; cv.height = H * R;
+const S = 12, X0 = 390, Y0 = 545;     // px per mm and world origin in px
+let curScale = S;
+function lw(px) { return px / curScale; }
+function pxT() { ctx.setTransform(R, 0, 0, R, 0, 0); }
+function worldT() { ctx.setTransform(R * S, 0, 0, -R * S, R * X0, R * Y0); curScale = S; }
+function toPx(x, y) { return [X0 + x * S, Y0 - y * S]; }
+
+function poly(pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath(); }
+function glow(on) { if (on) { ctx.shadowColor = "#5fd0ff"; ctx.shadowBlur = 16 * R; } else { ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; } }
+
+function drawBottom() {
+  ctx.fillStyle = "#2b2f36"; ctx.strokeStyle = "#5d6570"; ctx.lineWidth = lw(1.2);
+  poly([[-7.8, 5], [-7.8, 0], [7.8, 0], [7.8, 5], [6.8, 5], [6.8, FLOOR], [-6.8, FLOOR], [-6.8, 5]]);
+  ctx.fill(); ctx.stroke();
+  ctx.fillRect(-1.6, -3.3, 3.2, 3.3);                // center post
+  ctx.strokeRect(-1.6, -3.3, 3.2, 3.3);
+  ctx.fillStyle = "#14171b"; ctx.fillRect(-1.1, -2.6, 2.2, 5.4);   // channel for the stem pole
+  ctx.fillStyle = "#3a404a"; ctx.fillRect(-1.6, FLOOR, 0.5, 1.8); ctx.fillRect(1.1, FLOOR, 0.5, 1.8);
+}
+
+function drawLeaves(d) {
+  const g = gapAt(d);
+  ctx.fillStyle = "#b8b2a6"; ctx.fillRect(-5.5, -3.3, 0.3, 3.7); ctx.fillRect(-4.35, -3.3, 0.3, 3.7); // PCB pins
+  ctx.fillStyle = "#c99a2e"; ctx.fillRect(-5.5, 0.4, 0.3, 5.2);                                       // fixed leaf
+  ctx.strokeStyle = "#e8bd52"; ctx.lineWidth = 0.28; ctx.lineJoin = "round"; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-4.2, 0.4); ctx.lineTo(-4.2, 3.4); ctx.lineTo(-5.05 + g, 5.0); ctx.lineTo(-4.6 + g, 6.8); ctx.stroke(); // moving leaf
+  ctx.fillStyle = "#ffd76a";
+  ctx.beginPath(); ctx.arc(-5.2, 5.0, 0.16, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-5.05 + g, 5.0, 0.16, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawSpring(len) {
+  const N = 9, steps = N * 24, Rs = 2.4;
+  ctx.lineWidth = 0.32; ctx.lineCap = "round";
+  for (let pass = 0; pass < 2; pass++) {
+    ctx.strokeStyle = pass === 0 ? "#6c737c" : "#d3d8de";
+    ctx.beginPath();
+    for (let i = 0; i < steps; i++) {
+      const a0 = i / 24 * Math.PI * 2, a1 = (i + 1) / 24 * Math.PI * 2;
+      const front = Math.cos((a0 + a1) / 2) > 0;
+      if (front !== (pass === 1)) continue;
+      ctx.moveTo(Rs * Math.sin(a0), FLOOR + len * i / steps);
+      ctx.lineTo(Rs * Math.sin(a1), FLOOR + len * (i + 1) / steps);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawStem() {
+  ctx.fillStyle = "#d8262e"; ctx.strokeStyle = "#ff6b6f"; ctx.lineWidth = lw(1);
+  ctx.fillRect(-2.0, 10.6, 4.0, 4.6); ctx.strokeRect(-2.0, 10.6, 4.0, 4.6);     // cross (keycap mount)
+  ctx.fillStyle = "#a51a20"; ctx.fillRect(-0.65, 10.6, 1.3, 4.6);
+  ctx.fillStyle = "#d8262e";
+  ctx.fillRect(-3.6, 7.0, 7.2, 3.6); ctx.strokeRect(-3.6, 7.0, 7.2, 3.6);       // slider body
+  ctx.fillRect(-1.0, 3.0, 2.0, 4.0); ctx.strokeRect(-1.0, 3.0, 2.0, 4.0);       // pole (spring guide)
+  // leg with ramp: holds the moving leaf open until 1.5 mm, releases it by 2.0 mm
+  poly([[-5.0, 6.4], [-3.9, 6.4], [-3.9, 8.1], [-4.6, 8.6], [-4.6, 10.0], [-3.6, 10.0], [-3.6, 10.6], [-5.0, 10.6]]);
+  ctx.fill(); ctx.stroke();
+}
+
+function drawTop() {
+  ctx.fillStyle = "rgba(130,145,160,0.30)"; ctx.strokeStyle = "#9aa7b4"; ctx.lineWidth = lw(1.2);
+  const L = [[-7.8, 5], [-7.8, 9.2], [-6.8, 11.6], [-2.2, 11.6], [-2.2, 10.8], [-6.0, 10.8], [-6.8, 9.4], [-6.8, 5]];
+  poly(L); ctx.fill(); ctx.stroke();
+  poly(L.map(p => [-p[0], p[1]])); ctx.fill(); ctx.stroke();
+}
+
+function drawKeycap(alpha) {
+  if (alpha <= 0.01) return;
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = "#7d8792"; ctx.lineWidth = lw(1.2); ctx.setLineDash([lw(5), lw(4)]);
+  poly([[-9, 12.6], [9, 12.6], [7.5, 20.5], [-7.5, 20.5]]); ctx.stroke();
+  ctx.setLineDash([]); ctx.globalAlpha = 1;
+}
+
+// draw the whole switch in the current world transform
+function drawSwitch(st, inset) {
+  const e = st.ex, d = st.d;
+  const off = id => { const p = PARTS.find(q => q.id === id); return [p.dx * e[id], p.dy * e[id]]; };
+  const springLen = lerp(REST_TOP - d - FLOOR, FREE, Math.max(e.spring, e.stem));
+  const items = [
+    ["bottom", () => drawBottom()],
+    ["leaves", () => drawLeaves(d)],
+    ["spring", () => drawSpring(springLen)],
+    ["stem",   () => { ctx.translate(0, -d); drawStem(); }],
+    ["top",    () => drawTop()]
+  ];
+  for (const [id, fn] of items) {
+    ctx.save();
+    const o = off(id); ctx.translate(o[0], o[1]);
+    glow(!inset && st.focus === id);
+    fn();
+    ctx.restore();
+  }
+  if (!inset) {
+    ctx.save(); const o = off("stem"); ctx.translate(o[0], o[1] - d);
+    drawKeycap(0.55 * (1 - maxEx(st))); ctx.restore();
+  }
+}
+function maxEx(st) { return Math.max(...ORDER.map(id => st.ex[id])); }
+
+function text(str, x, y, font, color, align) {
+  ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align || "left"; ctx.textBaseline = "alphabetic"; ctx.fillText(str, x, y);
+}
+
+function drawLabels(st) {
+  pxT();
+  for (const p of PARTS) {
+    const a = clamp((st.ex[p.id] - 0.3) / 0.7, 0, 1);
+    if (a <= 0) continue;
+    const [x, y] = toPx(p.label[0] + p.dx * st.ex[p.id], p.label[1] + p.dy * st.ex[p.id]);
+    ctx.globalAlpha = a;
+    const hot = st.focus === p.id;
+    if (p.side === "above") {
+      text(p.name, x, y - 18, "700 16px system-ui, sans-serif", hot ? "#5fd0ff" : "#ffffff", "center");
+      text(p.note, x, y, "13px system-ui, sans-serif", "#a9b4bf", "center");
+    } else {
+      text(p.name, x, y, "700 16px system-ui, sans-serif", hot ? "#5fd0ff" : "#ffffff", "center");
+      text(p.note, x, y + 18, "13px system-ui, sans-serif", "#a9b4bf", "center");
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawRuler(st) {
+  const a = 1 - maxEx(st);
+  if (a <= 0.01) return;
+  pxT(); ctx.globalAlpha = a;
+  const STEM_TOP = 15.2, rx = 12.0;
+  const [x, yTop] = toPx(rx, STEM_TOP), [, yBot] = toPx(rx, STEM_TOP - TOTAL), [, yFire] = toPx(rx, STEM_TOP - PRE);
+  ctx.strokeStyle = "#6f7a86"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); ctx.stroke();
+  for (let m = 0; m <= TOTAL + 1e-6; m += 0.5) {
+    const [, yy] = toPx(rx, STEM_TOP - m);
+    ctx.beginPath(); ctx.moveTo(x, yy); ctx.lineTo(x + (m % 1 === 0 ? 10 : 6), yy); ctx.stroke();
+  }
+  text("0 mm", x + 14, yTop + 4, "12px system-ui, sans-serif", "#9aa7b4");
+  text("4.0 mm bottom-out", x + 14, yBot + 4, "12px system-ui, sans-serif", "#9aa7b4");
+  const cl = closed(st.d);
+  ctx.strokeStyle = "#ff9b3d"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x - 6, yFire); ctx.lineTo(x + 14, yFire); ctx.stroke();
+  text("2.0 mm: fires here", x + 18, yFire + 4, "700 12px system-ui, sans-serif", "#ff9b3d");
+  // pointer at the current stem top (same d as the parts)
+  const [, yd] = toPx(rx, STEM_TOP - st.d);
+  const [sx] = toPx(2.0, 0);
+  ctx.strokeStyle = cl ? "#3fdc7f" : "#d8262e"; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(sx, yd); ctx.lineTo(x - 8, yd); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = cl ? "#3fdc7f" : "#d8262e";
+  ctx.beginPath(); ctx.moveTo(x - 1, yd); ctx.lineTo(x - 11, yd - 6); ctx.lineTo(x - 11, yd + 6); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawContactGlow(st) {
+  if (!closed(st.d)) return;
+  const p = PARTS.find(q => q.id === "leaves");
+  const [x, y] = toPx(-5.2 + p.dx * st.ex.leaves, 5.0 + p.dy * st.ex.leaves);
+  pxT();
+  const g = ctx.createRadialGradient(x, y, 0, x, y, 22);
+  g.addColorStop(0, "rgba(255,230,120,0.95)"); g.addColorStop(1, "rgba(255,200,60,0)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 22, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawInset(st) {
+  const a = 1 - maxEx(st);
+  if (a <= 0.01) return;
+  const cx = 645, cy = 150, r = 82, Z = 48, wx = -4.6, wy = 6.4;
+  pxT(); ctx.globalAlpha = a;
+  const [tx, ty] = toPx(wx, wy);
+  ctx.strokeStyle = "#4a5562"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(cx - r * 0.8, cy + r * 0.6); ctx.stroke();
+  ctx.beginPath(); ctx.arc(tx, ty, 14, 0, Math.PI * 2); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fillStyle = "#0b0e12"; ctx.fill(); ctx.clip();
+  ctx.setTransform(R * Z, 0, 0, -R * Z, R * (cx - Z * wx), R * (cy + Z * wy)); curScale = Z;
+  const flat = { ex: { top: 0, stem: 0, spring: 0, leaves: 0, bottom: 0 }, d: st.d, focus: null };
+  drawSwitch(flat, true);
+  ctx.restore(); curScale = S;
+  pxT(); ctx.globalAlpha = a;
+  const cl = closed(st.d);
+  if (cl) {
+    const px = cx + (-5.2 - wx) * Z, py = cy - (5.0 - wy) * Z;
+    const g = ctx.createRadialGradient(px, py, 0, px, py, 26);
+    g.addColorStop(0, "rgba(255,230,120,0.9)"); g.addColorStop(1, "rgba(255,200,60,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, 26, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = cl ? "#3fdc7f" : "#6f7a86"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  text("contacts x4: " + (cl ? "CLOSED" : "gap " + gapAt(st.d).toFixed(2) + " mm"), cx, cy + r + 18, "700 12px system-ui, sans-serif", cl ? "#3fdc7f" : "#9aa7b4", "center");
+  ctx.globalAlpha = 1;
+}
+
+function drawPanel(st) {
+  pxT();
+  const x = 790, y = 24, w = 385, h = 372;
+  ctx.fillStyle = "#151a20"; ctx.strokeStyle = "#2a323c"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, 10) : ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
+  const d = st.d, F = force(d), cl = closed(d);
+  text("LIVE (same formulas that move the parts)", x + 18, y + 26, "700 11px system-ui, sans-serif", "#6f7a86");
+  text("Key travel", x + 18, y + 54, "13px system-ui, sans-serif", "#9aa7b4");
+  text(d.toFixed(2) + " mm", x + 18, y + 88, "700 32px system-ui, sans-serif", "#ffffff");
+  text("of 4.0 mm", x + 165, y + 88, "14px system-ui, sans-serif", "#6f7a86");
+  // travel bar
+  const bx = x + 18, by = y + 100, bw = w - 36;
+  ctx.fillStyle = "#232a33"; ctx.fillRect(bx, by, bw, 10);
+  ctx.fillStyle = cl ? "#3fdc7f" : "#d8262e"; ctx.fillRect(bx, by, bw * d / TOTAL, 10);
+  ctx.fillStyle = "#ff9b3d"; ctx.fillRect(bx + bw * PRE / TOTAL - 1, by - 4, 2, 18);
+  text("fires at 2.0", bx + bw * PRE / TOTAL, by + 28, "11px system-ui, sans-serif", "#ff9b3d", "center");
+  text("Spring force", x + 18, y + 158, "13px system-ui, sans-serif", "#9aa7b4");
+  text(F.toFixed(1) + " cN", x + 18, y + 192, "700 32px system-ui, sans-serif", "#ffffff");
+  text("≈ " + F.toFixed(0) + " gf", x + 165, y + 192, "14px system-ui, sans-serif", "#6f7a86");
+  text("Contacts", x + 18, y + 222, "13px system-ui, sans-serif", "#9aa7b4");
+  text(cl ? "CLOSED: keypress sent" : "OPEN", x + 18, y + 254, "700 26px system-ui, sans-serif", cl ? "#3fdc7f" : "#c7ced6");
+  ctx.fillStyle = "#2a323c"; ctx.fillRect(x + 18, y + 270, w - 36, 1);
+  text("Cherry MX Red spec", x + 18, y + 292, "700 13px system-ui, sans-serif", "#dfe4ea");
+  text("Operating force 45 cN   Pre-travel 2.0 ± 0.6 mm", x + 18, y + 312, "12px system-ui, sans-serif", "#a9b4bf");
+  text("Total travel 4.0 mm (−0.4)   Linear: no bump, no click", x + 18, y + 330, "12px system-ui, sans-serif", "#a9b4bf");
+  text("Force curve: linear fit through 45 cN @ 2.0 mm,", x + 18, y + 350, "11px system-ui, sans-serif", "#6f7a86");
+  text("30 cN at rest and 60 cN at 4.0 mm are approximate.", x + 18, y + 364, "11px system-ui, sans-serif", "#6f7a86");
+}
+
+function drawChart(st) {
+  pxT();
+  const x0 = 820, y0 = 628, cw = 340, ch = 180, FMAX = 70;
+  const X = m => x0 + m / TOTAL * cw, Y = f => y0 - f / FMAX * ch;
+  text("Force vs travel", x0 - 30, y0 - ch - 16, "700 13px system-ui, sans-serif", "#dfe4ea");
+  ctx.strokeStyle = "#2a323c"; ctx.lineWidth = 1;
+  for (let f = 0; f <= FMAX; f += 10) { ctx.beginPath(); ctx.moveTo(x0, Y(f)); ctx.lineTo(x0 + cw, Y(f)); ctx.stroke(); }
+  for (let f = 0; f <= FMAX; f += 20) text(String(f), x0 - 6, Y(f) + 4, "11px system-ui, sans-serif", "#6f7a86", "right");
+  for (let m = 0; m <= TOTAL; m++) text(m + " mm", X(m), y0 + 16, "11px system-ui, sans-serif", "#6f7a86", "center");
+  text("cN", x0 - 6, Y(FMAX) - 8, "11px system-ui, sans-serif", "#6f7a86", "right");
+  // filled area up to current travel
+  ctx.fillStyle = closed(st.d) ? "rgba(63,220,127,0.18)" : "rgba(216,38,46,0.18)";
+  ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(0), Y(force(0)));
+  ctx.lineTo(X(st.d), Y(force(st.d))); ctx.lineTo(X(st.d), Y(0)); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#d8262e"; ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  for (let i = 0; i <= 40; i++) { const m = TOTAL * i / 40; i ? ctx.lineTo(X(m), Y(force(m))) : ctx.moveTo(X(m), Y(force(m))); }
+  ctx.stroke();
+  ctx.strokeStyle = "#ff9b3d"; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(X(PRE), Y(0)); ctx.lineTo(X(PRE), Y(FMAX)); ctx.stroke(); ctx.setLineDash([]);
+  text("fires: 2.0 mm, 45 cN", X(PRE) + 6, Y(FMAX) + 12, "700 11px system-ui, sans-serif", "#ff9b3d");
+  ctx.fillStyle = "#ff9b3d"; ctx.beginPath(); ctx.arc(X(PRE), Y(F_OP), 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = closed(st.d) ? "#3fdc7f" : "#ffffff";
+  ctx.beginPath(); ctx.arc(X(st.d), Y(force(st.d)), 6, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawTimeline(st) {
+  if (st.t == null) return;
+  pxT();
+  const x = 30, y = 660, w = 710;
+  ctx.fillStyle = "#232a33"; ctx.fillRect(x, y, w, 4);
+  ctx.fillStyle = "#3fbf6f"; ctx.fillRect(x, y, w * st.t / TOUR_LEN, 4);
+  text("t = " + st.t.toFixed(2) + " s / 10 s", x + w, y - 6, "11px system-ui, sans-serif", "#6f7a86", "right");
+}
+
+function draw(st) {
+  pxT();
+  ctx.fillStyle = "#0f1216"; ctx.fillRect(0, 0, W, H);
+  // PCB line
+  ctx.fillStyle = "#16301f"; ctx.fillRect(20, Y0, 740, 3);
+  text(st.caption, 30, 44, "700 24px system-ui, sans-serif", "#ffffff");
+  text(st.sub || "", 30, 68, "14px system-ui, sans-serif", "#9aa7b4");
+  worldT();
+  drawSwitch(st, false);
+  drawContactGlow(st);
+  drawLabels(st);
+  drawRuler(st);
+  drawInset(st);
+  drawPanel(st);
+  drawChart(st);
+  drawTimeline(st);
+  syncUI(st);
+}
+
+// ---------- interaction ----------
+const slider = document.getElementById("slider"), sv = document.getElementById("sv");
+const zero = () => ({ top: 0, stem: 0, spring: 0, leaves: 0, bottom: 0 });
+let mode = "manual", running = false, last = null, tourT0 = 0, pressT0 = 0;
+const cur = { ex: zero(), d: 0 }, tgt = { ex: zero() };
+
+function manualCaption() {
+  const pulled = PARTS.filter(p => cur.ex[p.id] > 0.5).map(p => p.name);
+  if (pulled.length) return ["Pulled out: " + pulled.join(", "), "Click a part again to put it back."];
+  if (cur.d > 0.005) return closed(cur.d)
+    ? ["Contacts closed at " + cur.d.toFixed(2) + " mm", "It fired at 2.0 mm (45 cN). Past that is overtravel."]
+    : ["Contacts open at " + cur.d.toFixed(2) + " mm", (PRE - cur.d).toFixed(2) + " mm more until it fires."];
+  return ["Cherry MX Red teardown", "Pull a part out, press the key, or run the 10 s auto tour."];
+}
+
+function syncUI(st) {
+  document.querySelectorAll("button[data-part]").forEach(b => {
+    const id = b.dataset.part;
+    const on = mode === "manual" || mode === "press" ? tgt.ex[id] > 0.5 : st.ex[id] > 0.5;
+    b.classList.toggle("on", on);
+  });
+  if (mode !== "manual") slider.value = st.d.toFixed(2);
+  sv.textContent = st.d.toFixed(2) + " mm";
+}
+
+function frame(now) {
+  if (mode === "hash") { running = false; return; }
+  const dt = last == null ? 0 : Math.min(0.05, (now - last) / 1000); last = now;
+  let st;
+  if (mode === "tour") {
+    const t = (now - tourT0) / 1000;
+    st = tourState(t);
+    if (t >= TOUR_LEN) { mode = "manual"; Object.assign(cur.ex, st.ex); cur.d = st.d; tgt.ex = zero(); }
+  } else {
+    for (const id of ORDER) cur.ex[id] += (tgt.ex[id] - cur.ex[id]) * Math.min(1, dt * 7);
+    if (mode === "press") {
+      const p = (now - pressT0) / 1000;
+      cur.d = p < 0.5 ? 0 : p < 1.7 ? TOTAL * ease((p - 0.5) / 1.2) : p < 2.4 ? TOTAL : p < 3.2 ? TOTAL * (1 - ease((p - 2.4) / 0.8)) : 0;
+      if (p >= 3.2) mode = "manual";
+    }
+    const [c, s] = manualCaption();
+    st = { ex: cur.ex, d: cur.d, focus: null, caption: c, sub: s, t: null };
+  }
+  draw(st);
+  requestAnimationFrame(frame);
+}
+function ensureLoop() { if (!running) { running = true; last = null; requestAnimationFrame(frame); } }
+function leaveHash() { if (mode === "hash") { mode = "manual"; } }
+
+document.querySelectorAll("button[data-part]").forEach(b => b.addEventListener("click", () => {
+  leaveHash(); if (mode === "tour") { mode = "manual"; }
+  const id = b.dataset.part; tgt.ex[id] = tgt.ex[id] > 0.5 ? 0 : 1;
+  ensureLoop();
+}));
+document.getElementById("btnPress").addEventListener("click", () => {
+  leaveHash(); tgt.ex = zero(); mode = "press"; pressT0 = performance.now(); ensureLoop();
+});
+document.getElementById("btnAssemble").addEventListener("click", () => {
+  leaveHash(); if (mode !== "press") mode = "manual"; tgt.ex = zero(); cur.d = 0; ensureLoop();
+});
+document.getElementById("btnTour").addEventListener("click", () => {
+  leaveHash(); mode = "tour"; tourT0 = performance.now(); ensureLoop();
+});
+slider.addEventListener("input", () => {
+  leaveHash(); mode = "manual"; cur.d = parseFloat(slider.value); ensureLoop();
+});
+
+// ---------- #t=<seconds>: draw that moment of the tour, deterministic ----------
+function readHash() {
+  const m = location.hash.match(/(?:^#|&)t=([0-9]*\.?[0-9]+)/);
+  if (!m) return false;
+  mode = "hash";
+  draw(tourState(parseFloat(m[1])));
+  return true;
+}
+window.renderAt = t => { mode = "hash"; draw(tourState(t)); };
+window.addEventListener("hashchange", () => { if (!readHash() && mode === "hash") { mode = "manual"; ensureLoop(); } });
+if (!readHash()) ensureLoop();
+</script>
+</body>
+</html>

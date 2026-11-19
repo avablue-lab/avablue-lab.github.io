@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1-bit Dither Print</title>
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#f4f4f1;color:#111;}
+  main{max-width:980px;margin:0 auto;padding:24px;}
+  h1{font-size:20px;margin:0 0 16px;font-weight:600;}
+  .controls{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:16px;}
+  label{display:flex;flex-direction:column;font-size:13px;gap:6px;}
+  select,input[type=file]{font:inherit;padding:6px 8px;}
+  input[type=range]{width:220px;}
+  button{font:inherit;cursor:pointer;background:#111;color:#fff;border:0;border-radius:4px;padding:8px 14px;}
+  button:disabled{opacity:.4;cursor:default;}
+  #stage{background:#fff;border:1px solid #ccc;min-height:320px;padding:12px;display:flex;justify-content:center;align-items:center;}
+  #view{display:none;max-width:100%;height:auto;image-rendering:pixelated;}
+  #hint{color:#666;font-size:14px;margin:0;}
+</style>
+</head>
+<body>
+<main>
+  <h1>1-bit dither print</h1>
+  <div class="controls">
+    <label>Photo
+      <input type="file" id="file" accept="image/*">
+    </label>
+    <label>Dither style
+      <select id="style">
+        <option value="fs">Floyd-Steinberg</option>
+        <option value="atkinson">Atkinson</option>
+        <option value="bayer4">Ordered (Bayer 4x4)</option>
+        <option value="bayer8">Ordered (Bayer 8x8)</option>
+        <option value="random">Random noise</option>
+        <option value="threshold">Plain threshold</option>
+      </select>
+    </label>
+    <label>Contrast: <span id="cval">0</span>
+      <input type="range" id="contrast" min="-100" max="100" value="0">
+    </label>
+    <button id="dl" disabled>Download PNG</button>
+  </div>
+  <div id="stage">
+    <p id="hint">Choose a photo to start.</p>
+    <canvas id="view"></canvas>
+  </div>
+</main>
+
+<script>
+(function () {
+  const fileInput = document.getElementById('file');
+  const styleSel  = document.getElementById('style');
+  const contrastEl = document.getElementById('contrast');
+  const cval      = document.getElementById('cval');
+  const dlBtn     = document.getElementById('dl');
+  const hint      = document.getElementById('hint');
+  const view      = document.getElementById('view');
+  const viewCtx   = view.getContext('2d');
+
+  const MAX_SIDE = 1400;
+  const src = document.createElement('canvas');
+  let hasImage = false;
+
+  fileInput.addEventListener('change', function (e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = function () {
+      const s = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * s));
+      const h = Math.max(1, Math.round(img.naturalHeight * s));
+      src.width = w;
+      src.height = h;
+      const sctx = src.getContext('2d');
+      sctx.fillStyle = '#fff';
+      sctx.fillRect(0, 0, w, h);
+      sctx.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      hasImage = true;
+      hint.style.display = 'none';
+      view.style.display = 'block';
+      dlBtn.disabled = false;
+      render();
+    };
+    img.onerror = function () {
+      URL.revokeObjectURL(url);
+      hint.textContent = 'Could not read that file. Try a JPG or PNG.';
+      hint.style.display = 'block';
+    };
+    img.src = url;
+  });
+
+  // Luma in 0..255, with the photo already composited on white.
+  function toGray(w, h) {
+    const d = src.getContext('2d').getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < g.length; i++, p += 4) {
+      g[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    }
+    return g;
+  }
+
+  // Standard contrast curve, -100..100 mapped to a gain around mid-grey.
+  function applyContrast(g, c) {
+    const f = (259 * (c + 255)) / (255 * (259 - c));
+    for (let i = 0; i < g.length; i++) {
+      const v = f * (g[i] - 128) + 128;
+      g[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    return g;
+  }
+
+  // Recursive Bayer matrix of the given power-of-two size.
+  function bayer(n) {
+    let m = [[0]];
+    let size = 1;
+    while (size < n) {
+      const s2 = size * 2;
+      const q = [[0, 2], [3, 1]];
+      const next = [];
+      for (let y = 0; y < s2; y++) {
+        next.push([]);
+        for (let x = 0; x < s2; x++) {
+          next[y][x] = 4 * m[y % size][x % size] + q[Math.floor(y / size)][Math.floor(x / size)];
+        }
+      }
+      m = next;
+      size = s2;
+    }
+    return { m: m, size: size };
+  }
+
+  // Returns 0 (black) or 255 (white) for every pixel.
+  function dither(g, w, h, style) {
+    const res = new Uint8ClampedArray(w * h);
+
+    if (style === 'fs' || style === 'atkinson') {
+      const buf = Float32Array.from(g);
+      const add = function (x, y, v) {
+        if (x >= 0 && x < w && y >= 0 && y < h) buf[y * w + x] += v;
+      };
+      const atkinson = style === 'atkinson';
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          const old = buf[i];
+          const nv = old < 128 ? 0 : 255;
+          res[i] = nv;
+          const err = old - nv;
+          if (atkinson) {
+            // Atkinson: 6/8 of the error is spread, 2/8 is dropped (higher contrast, airy highlights).
+            const e = err / 8;
+            add(x + 1, y, e); add(x + 2, y, e);
+            add(x - 1, y + 1, e); add(x, y + 1, e); add(x + 1, y + 1, e);
+            add(x, y + 2, e);
+          } else {
+            add(x + 1, y, err * 7 / 16);
+            add(x - 1, y + 1, err * 3 / 16);
+            add(x, y + 1, err * 5 / 16);
+            add(x + 1, y + 1, err / 16);
+          }
+        }
+      }
+    } else if (style === 'bayer4' || style === 'bayer8') {
+      const b = bayer(style === 'bayer4' ? 4 : 8);
+      const cells = b.size * b.size;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const t = (b.m[y % b.size][x % b.size] + 0.5) / cells * 255;
+          res[y * w + x] = g[y * w + x] > t ? 255 : 0;
+        }
+      }
+    } else if (style === 'random') {
+      for (let i = 0; i < res.length; i++) {
+        res[i] = g[i] > Math.random() * 255 ? 255 : 0;
+      }
+    } else {
+      for (let i = 0; i < res.length; i++) {
+        res[i] = g[i] >= 128 ? 255 : 0;
+      }
+    }
+    return res;
+  }
+
+  function render() {
+    if (!hasImage) return;
+    const c = Number(contrastEl.value);
+    cval.textContent = String(c);
+    const w = src.width, h = src.height;
+    const g = applyContrast(toGray(w, h), c);
+    const bits = dither(g, w, h, styleSel.value);
+
+    view.width = w;
+    view.height = h;
+    const img = viewCtx.createImageData(w, h);
+    const d = img.data;
+    for (let i = 0, p = 0; i < bits.length; i++, p += 4) {
+      d[p] = d[p + 1] = d[p + 2] = bits[i];
+      d[p + 3] = 255;
+    }
+    viewCtx.putImageData(img, 0, 0);
+  }
+
+  styleSel.addEventListener('change', render);
+  contrastEl.addEventListener('input', render);
+
+  dlBtn.addEventListener('click', function () {
+    if (!hasImage) return;
+    view.toBlob(function (blob) {
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = 'dither-' + styleSel.value + '-contrast' + contrastEl.value + '.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }, 'image/png');
+  });
+})();
+</script>
+</body>
+</html>

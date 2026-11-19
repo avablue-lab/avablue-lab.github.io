@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1-Bit Dither Print</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --line:#333; --fg:#eee; --dim:#999; --accent:#f2f2f2; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 ui-monospace,Menlo,Consolas,monospace; background:var(--bg); color:var(--fg); min-height:100vh; display:flex; flex-direction:column; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; }
+  header h1 { margin:0; font-size:16px; letter-spacing:.08em; text-transform:uppercase; }
+  header span { color:var(--dim); }
+  main { flex:1; display:flex; flex-wrap:wrap; }
+  aside { width:300px; max-width:100%; padding:18px 20px; border-right:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; gap:18px; }
+  label.field { display:flex; flex-direction:column; gap:6px; color:var(--dim); text-transform:uppercase; font-size:11px; letter-spacing:.1em; }
+  select, input[type=range] { width:100%; }
+  select, button, .file { background:#000; color:var(--fg); border:1px solid #555; padding:9px 10px; font:inherit; border-radius:0; }
+  button { cursor:pointer; background:var(--accent); color:#000; border-color:var(--accent); font-weight:bold; text-transform:uppercase; letter-spacing:.08em; }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  button.secondary { background:#000; color:var(--fg); border-color:#555; }
+  .file { cursor:pointer; text-align:center; text-transform:uppercase; letter-spacing:.08em; }
+  .file:hover, button.secondary:hover { border-color:var(--fg); }
+  input[type=file] { display:none; }
+  .val { color:var(--fg); }
+  .row { display:flex; justify-content:space-between; }
+  .stage { flex:1; min-width:280px; padding:20px; display:flex; align-items:center; justify-content:center; background:
+      repeating-conic-gradient(#161616 0% 25%, #131313 0% 50%) 0 0/20px 20px; }
+  canvas { max-width:100%; max-height:80vh; image-rendering:pixelated; background:#fff; box-shadow:0 0 0 1px #444, 0 10px 40px rgba(0,0,0,.6); display:none; }
+  .empty { color:var(--dim); text-align:center; border:1px dashed #444; padding:60px 40px; cursor:pointer; }
+  .empty.drag { border-color:var(--fg); color:var(--fg); }
+  small { color:var(--dim); }
+</style>
+</head>
+<body>
+<header><h1>1-Bit Dither Print</h1><span id="info">no image loaded</span></header>
+<main>
+  <aside>
+    <label class="file">Upload photo<input type="file" id="file" accept="image/*"></label>
+
+    <label class="field">Dither style
+      <select id="style">
+        <option value="floyd">Floyd-Steinberg</option>
+        <option value="atkinson" selected>Atkinson</option>
+        <option value="stucki">Stucki</option>
+        <option value="sierra">Sierra Lite</option>
+        <option value="bayer2">Ordered Bayer 2x2</option>
+        <option value="bayer4">Ordered Bayer 4x4</option>
+        <option value="bayer8">Ordered Bayer 8x8</option>
+        <option value="halftone">Halftone dots</option>
+        <option value="lines">Scan lines</option>
+        <option value="random">Random noise</option>
+        <option value="threshold">Plain threshold</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span class="row"><span>Contrast</span><span class="val" id="cVal">0</span></span>
+      <input type="range" id="contrast" min="-100" max="100" value="0">
+    </label>
+
+    <label class="field">
+      <span class="row"><span>Brightness</span><span class="val" id="bVal">0</span></span>
+      <input type="range" id="bright" min="-100" max="100" value="0">
+    </label>
+
+    <label class="field">
+      <span class="row"><span>Max width (px)</span><span class="val" id="wVal">800</span></span>
+      <input type="range" id="width" min="100" max="2000" step="50" value="800">
+    </label>
+
+    <label class="field">Ink / paper
+      <select id="palette">
+        <option value="bw">Black on white</option>
+        <option value="wb">White on black</option>
+        <option value="sepia">Dark brown on cream</option>
+      </select>
+    </label>
+
+    <button id="download" disabled>Download PNG</button>
+    <small>Everything runs locally in your browser. Nothing is uploaded.</small>
+  </aside>
+  <div class="stage" id="stage">
+    <div class="empty" id="empty">Drop a photo here<br>or click to choose one</div>
+    <canvas id="out"></canvas>
+  </div>
+</main>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const fileEl = $('file'), styleEl = $('style'), cEl = $('contrast'), bEl = $('bright'),
+        wEl = $('width'), palEl = $('palette'), dl = $('download'), out = $('out'),
+        empty = $('empty'), info = $('info'), stage = $('stage');
+  const octx = out.getContext('2d');
+  let img = null, fileName = 'print', pending = false;
+
+  const PAL = { bw:[[0,0,0],[255,255,255]], wb:[[255,255,255],[0,0,0]], sepia:[[43,28,18],[240,230,205]] };
+
+  const BAYER2 = [[0,2],[3,1]];
+  function bayer(n) {
+    if (n === 2) return BAYER2;
+    const p = bayer(n/2), m = [];
+    for (let y=0;y<n;y++){ m[y]=[]; for (let x=0;x<n;x++){
+      m[y][x] = 4*p[y%(n/2)][x%(n/2)] + BAYER2[Math.floor(y/(n/2))][Math.floor(x/(n/2))];
+    }}
+    return m;
+  }
+  const BAY = { 2:bayer(2), 4:bayer(4), 8:bayer(8) };
+
+  // error-diffusion kernels: [dx, dy, weight], divisor
+  const KERN = {
+    floyd:    { d:16, k:[[1,0,7],[-1,1,3],[0,1,5],[1,1,1]] },
+    atkinson: { d:8,  k:[[1,0,1],[2,0,1],[-1,1,1],[0,1,1],[1,1,1],[0,2,1]] },
+    stucki:   { d:42, k:[[1,0,8],[2,0,4],[-2,1,2],[-1,1,4],[0,1,8],[1,1,4],[2,1,2],[-2,2,1],[-1,2,2],[0,2,4],[1,2,2],[2,2,1]] },
+    sierra:   { d:4,  k:[[1,0,2],[-1,1,1],[0,1,1]] }
+  };
+
+  function render() {
+    if (!img) return;
+    const maxW = +wEl.value;
+    const scale = Math.min(1, maxW / img.naturalWidth);
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    out.width = w; out.height = h;
+
+    // draw to get pixels (white backdrop handles transparent PNGs)
+    octx.fillStyle = '#fff'; octx.fillRect(0,0,w,h);
+    octx.drawImage(img, 0, 0, w, h);
+    const src = octx.getImageData(0,0,w,h);
+    const px = src.data;
+
+    // grayscale + brightness/contrast
+    const c = +cEl.value, b = +bEl.value;
+    const f = (259*(c+255)) / (255*(259-c));
+    const g = new Float32Array(w*h);
+    for (let i=0, j=0; i<px.length; i+=4, j++) {
+      let v = 0.2126*px[i] + 0.7152*px[i+1] + 0.0722*px[i+2];
+      v = f*(v-128) + 128 + b*1.28;
+      g[j] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+
+    const bits = new Uint8Array(w*h); // 1 = paper (light)
+    const s = styleEl.value;
+
+    if (KERN[s]) {
+      const {d,k} = KERN[s];
+      for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+        const i = y*w+x, old = g[i], nv = old < 128 ? 0 : 255;
+        bits[i] = nv ? 1 : 0;
+        const err = old - nv;
+        for (let n=0;n<k.length;n++) {
+          const xx = x+k[n][0], yy = y+k[n][1];
+          if (xx>=0 && xx<w && yy<h) g[yy*w+xx] += err * k[n][2] / d;
+        }
+      }
+    } else if (s.startsWith('bayer')) {
+      const n = +s.slice(5), m = BAY[n], nn = n*n;
+      for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+        const t = (m[y%n][x%n] + 0.5) / nn * 255;
+        bits[y*w+x] = g[y*w+x] > t ? 1 : 0;
+      }
+    } else if (s === 'halftone') {
+      const cell = Math.max(4, Math.round(w/120));
+      const ang = Math.PI/4, ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+        const u = x*ca + y*sa, v = -x*sa + y*ca;
+        const fu = (u/cell) - Math.floor(u/cell) - .5, fv = (v/cell) - Math.floor(v/cell) - .5;
+        const dist = Math.sqrt(fu*fu+fv*fv) / 0.7071; // 0 center .. 1 corner
+        const dark = 1 - g[y*w+x]/255;
+        bits[y*w+x] = dist < Math.sqrt(dark) ? 0 : 1;
+      }
+    } else if (s === 'lines') {
+      const period = Math.max(3, Math.round(h/150));
+      for (let y=0;y<h;y++) {
+        const fy = ((y % period) / period);
+        for (let x=0;x<w;x++) {
+          const dark = 1 - g[y*w+x]/255;
+          const wave = Math.sin(x*0.25) * 0.04;
+          bits[y*w+x] = Math.abs(fy-.5)*2 < (1-dark) + wave - 0.0 ? 1 : 0;
+          if (dark > .97) bits[y*w+x] = 0;
+          if (dark < .03) bits[y*w+x] = 1;
+        }
+      }
+    } else if (s === 'random') {
+      for (let i=0;i<w*h;i++) bits[i] = g[i] > Math.random()*255 ? 1 : 0;
+    } else { // threshold
+      for (let i=0;i<w*h;i++) bits[i] = g[i] >= 128 ? 1 : 0;
+    }
+
+    const [ink, paper] = PAL[palEl.value];
+    const outData = octx.createImageData(w,h), od = outData.data;
+    for (let i=0, j=0; j<w*h; i+=4, j++) {
+      const col = bits[j] ? paper : ink;
+      od[i]=col[0]; od[i+1]=col[1]; od[i+2]=col[2]; od[i+3]=255;
+    }
+    octx.putImageData(outData,0,0);
+
+    out.style.display = 'block';
+    empty.style.display = 'none';
+    dl.disabled = false;
+    info.textContent = w + ' x ' + h + ' px, 1-bit';
+  }
+
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; render(); });
+  }
+
+  function loadFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    fileName = (file.name || 'print').replace(/\.[^.]+$/, '');
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => { img = im; URL.revokeObjectURL(url); render(); };
+    im.onerror = () => { info.textContent = 'could not read that image'; URL.revokeObjectURL(url); };
+    im.src = url;
+  }
+
+  fileEl.addEventListener('change', e => loadFile(e.target.files[0]));
+  empty.addEventListener('click', () => fileEl.click());
+  ['dragenter','dragover'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); empty.classList.add('drag'); }));
+  ['dragleave','drop'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); empty.classList.remove('drag'); }));
+  stage.addEventListener('drop', e => loadFile(e.dataTransfer.files[0]));
+
+  cEl.addEventListener('input', () => { $('cVal').textContent = cEl.value; schedule(); });
+  bEl.addEventListener('input', () => { $('bVal').textContent = bEl.value; schedule(); });
+  wEl.addEventListener('input', () => { $('wVal').textContent = wEl.value; schedule(); });
+  styleEl.addEventListener('change', schedule);
+  palEl.addEventListener('change', schedule);
+
+  dl.addEventListener('click', () => {
+    if (!img) return;
+    out.toBlob(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName + '-dither-' + styleEl.value + '.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }, 'image/png');
+  });
+})();
+</script>
+</body>
+</html>

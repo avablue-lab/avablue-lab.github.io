@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1-bit 2px dither print</title>
+<style>
+  [hidden] { display: none !important; }
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #f2f2f0;
+    color: #111;
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center;
+    padding: 12px 0 16px; margin-bottom: 20px; border-bottom: 1px solid #ddd;
+  }
+  .controls label { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .controls input[type="range"] { width: 180px; }
+  #contrastVal { display: inline-block; min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
+  select, button { font: inherit; font-size: 14px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #drop {
+    border: 1px dashed #999; background: #fff; color: #555;
+    padding: 24px; text-align: center; font-size: 14px; margin-bottom: 20px;
+  }
+  #drop.over { border-color: #000; background: #fafafa; }
+  #preview {
+    display: block; width: 100%; height: auto;
+    image-rendering: pixelated; background: #fff; border: 1px solid #ccc;
+  }
+  #status { font-size: 13px; color: #555; margin-top: 8px; min-height: 1em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>1-bit dither print, 2px dots</h1>
+
+  <div class="controls">
+    <button id="pick" type="button">Choose photo</button>
+    <label>Dither
+      <select id="style">
+        <option value="fs" selected>Floyd–Steinberg</option>
+        <option value="atkinson">Atkinson (airy)</option>
+        <option value="jjn">Jarvis, Judice &amp; Ninke (smooth)</option>
+        <option value="stucki">Stucki (sharp)</option>
+        <option value="bayer4">Ordered, Bayer 4×4</option>
+        <option value="bayer8">Ordered, Bayer 8×8</option>
+        <option value="random">Random noise</option>
+        <option value="threshold">Plain threshold</option>
+      </select>
+    </label>
+    <label>Contrast
+      <input id="contrast" type="range" min="-100" max="100" step="1" value="0">
+      <span id="contrastVal">0</span>
+    </label>
+    <button id="download" type="button" disabled>Download PNG</button>
+  </div>
+
+  <div id="drop">Drop a photo here, or click “Choose photo”.</div>
+  <input id="file" type="file" accept="image/*" hidden>
+
+  <canvas id="preview" hidden></canvas>
+  <div id="status"></div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var MAX_COLS = 480; // dots across, at most
+  var DOT = 2;        // each dot is 2 x 2 px
+
+  var fileInput = document.getElementById('file');
+  var pickBtn = document.getElementById('pick');
+  var styleSel = document.getElementById('style');
+  var contrastEl = document.getElementById('contrast');
+  var contrastVal = document.getElementById('contrastVal');
+  var dlBtn = document.getElementById('download');
+  var canvas = document.getElementById('preview');
+  var ctx = canvas.getContext('2d');
+  var drop = document.getElementById('drop');
+  var statusEl = document.getElementById('status');
+
+  var work = document.createElement('canvas');
+  var wctx = work.getContext('2d', { willReadFrequently: true });
+
+  var img = null;
+  var objectUrl = null;
+  var raf = 0;
+  var fileName = 'photo';
+
+  var KERNELS = {
+    fs: { div: 16, k: [[1,0,7],[-1,1,3],[0,1,5],[1,1,1]] },
+    atkinson: { div: 8, k: [[1,0,1],[2,0,1],[-1,1,1],[0,1,1],[1,1,1],[0,2,1]] },
+    jjn: { div: 48, k: [
+      [1,0,7],[2,0,5],
+      [-2,1,3],[-1,1,5],[0,1,7],[1,1,5],[2,1,3],
+      [-2,2,1],[-1,2,3],[0,2,5],[1,2,3],[2,2,1]
+    ] },
+    stucki: { div: 42, k: [
+      [1,0,8],[2,0,4],
+      [-2,1,2],[-1,1,4],[0,1,8],[1,1,4],[2,1,2],
+      [-2,2,1],[-1,2,2],[0,2,4],[1,2,2],[2,2,1]
+    ] }
+  };
+
+  // Bayer threshold matrix, built recursively: M(2n) from M(n).
+  function bayerMatrix(n) {
+    if (n === 1) return [[0]];
+    var h = n / 2;
+    var s = bayerMatrix(h);
+    var m = [];
+    for (var y = 0; y < n; y++) {
+      m.push([]);
+      for (var x = 0; x < n; x++) {
+        var v = s[y % h][x % h] * 4;
+        var top = y < h;
+        var left = x < h;
+        m[y][x] = top ? (left ? v : v + 2) : (left ? v + 3 : v + 1);
+      }
+    }
+    return m;
+  }
+  var B4 = bayerMatrix(4);
+  var B8 = bayerMatrix(8);
+
+  // Error diffusion. g is modified in place. Returns 1 for white, 0 for black.
+  function diffuse(g, w, h, kern) {
+    var bits = new Uint8Array(w * h);
+    var div = kern.div;
+    var k = kern.k;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var i = y * w + x;
+        var on = g[i] >= 128;
+        bits[i] = on ? 1 : 0;
+        var err = (g[i] - (on ? 255 : 0)) / div;
+        for (var j = 0; j < k.length; j++) {
+          var nx = x + k[j][0];
+          var ny = y + k[j][1];
+          if (nx >= 0 && nx < w && ny < h) {
+            g[ny * w + nx] += err * k[j][2];
+          }
+        }
+      }
+    }
+    return bits;
+  }
+
+  function ordered(g, w, h, M) {
+    var n = M.length;
+    var cells = n * n;
+    var bits = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var i = y * w + x;
+        var thr = (M[y % n][x % n] + 0.5) * 255 / cells;
+        bits[i] = g[i] > thr ? 1 : 0;
+      }
+    }
+    return bits;
+  }
+
+  function randomDither(g, w, h) {
+    var bits = new Uint8Array(w * h);
+    for (var i = 0; i < g.length; i++) {
+      bits[i] = g[i] > Math.random() * 255 ? 1 : 0;
+    }
+    return bits;
+  }
+
+  function threshold(g) {
+    var bits = new Uint8Array(g.length);
+    for (var i = 0; i < g.length; i++) bits[i] = g[i] >= 128 ? 1 : 0;
+    return bits;
+  }
+
+  function dither(g, w, h, style) {
+    if (KERNELS[style]) return diffuse(g, w, h, KERNELS[style]);
+    if (style === 'bayer4') return ordered(g, w, h, B4);
+    if (style === 'bayer8') return ordered(g, w, h, B8);
+    if (style === 'random') return randomDither(g, w, h);
+    return threshold(g);
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    if (!file.type || file.type.indexOf('image/') !== 0) {
+      statusEl.textContent = 'That file is not an image.';
+      return;
+    }
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(file);
+    fileName = (file.name || 'photo').replace(/\.[^.]+$/, '') || 'photo';
+    var im = new Image();
+    im.onload = function () {
+      img = im;
+      dlBtn.disabled = false;
+      render();
+    };
+    im.onerror = function () {
+      statusEl.textContent = 'Could not read that image.';
+    };
+    im.src = objectUrl;
+  }
+
+  function render() {
+    if (!img) return;
+
+    var cols = Math.max(1, Math.min(MAX_COLS, img.naturalWidth));
+    var rows = Math.max(1, Math.round(cols * img.naturalHeight / img.naturalWidth));
+
+    // Sample the photo down to one grid cell per dot, over white.
+    work.width = cols;
+    work.height = rows;
+    wctx.fillStyle = '#fff';
+    wctx.fillRect(0, 0, cols, rows);
+    wctx.imageSmoothingEnabled = true;
+    wctx.imageSmoothingQuality = 'high';
+    wctx.drawImage(img, 0, 0, cols, rows);
+    var data = wctx.getImageData(0, 0, cols, rows).data;
+
+    var n = cols * rows;
+    var gray = new Float32Array(n);
+    for (var i = 0, p = 0; i < n; i++, p += 4) {
+      gray[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+    }
+
+    // Contrast around mid-grey, using the standard contrast formula.
+    var c = Number(contrastEl.value) * 2.55;
+    var f = (259 * (c + 255)) / (255 * (259 - c));
+    for (var j = 0; j < n; j++) {
+      var v = f * (gray[j] - 128) + 128;
+      gray[j] = v < 0 ? 0 : (v > 255 ? 255 : v);
+    }
+
+    var bits = dither(gray, cols, rows, styleSel.value);
+
+    // Paint each cell as a DOT x DOT block of pure black or white.
+    var W = cols * DOT;
+    var H = rows * DOT;
+    canvas.width = W;
+    canvas.height = H;
+    var out = ctx.createImageData(W, H);
+    var px = out.data;
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var val = bits[y * cols + x] ? 255 : 0;
+        for (var dy = 0; dy < DOT; dy++) {
+          var q = ((y * DOT + dy) * W + x * DOT) * 4;
+          for (var dx = 0; dx < DOT; dx++, q += 4) {
+            px[q] = val;
+            px[q + 1] = val;
+            px[q + 2] = val;
+            px[q + 3] = 255;
+          }
+        }
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    canvas.hidden = false;
+    statusEl.textContent = img.naturalWidth + '×' + img.naturalHeight + ' px → ' +
+      cols + '×' + rows + ' dots (' + W + '×' + H + ' px)';
+  }
+
+  function scheduleRender() {
+    if (raf) return;
+    raf = requestAnimationFrame(function () {
+      raf = 0;
+      render();
+    });
+  }
+
+  pickBtn.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () {
+    loadFile(fileInput.files && fileInput.files[0]);
+    fileInput.value = '';
+  });
+
+  styleSel.addEventListener('change', function () { render(); });
+
+  contrastEl.addEventListener('input', function () {
+    contrastVal.textContent = contrastEl.value;
+    scheduleRender();
+  });
+
+  dlBtn.addEventListener('click', function () {
+    if (!img) return;
+    canvas.toBlob(function (blob) {
+      if (!blob) return;
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = fileName + '-dither-2px-' + styleSel.value + '.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }, 'image/png');
+  });
+
+  drop.addEventListener('click', function () { fileInput.click(); });
+  drop.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    drop.classList.add('over');
+  });
+  drop.addEventListener('dragleave', function () {
+    drop.classList.remove('over');
+  });
+  drop.addEventListener('drop', function (e) {
+    e.preventDefault();
+    drop.classList.remove('over');
+    loadFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+  });
+
+  // Stop the browser from opening a photo dropped outside the drop zone.
+  window.addEventListener('dragover', function (e) { e.preventDefault(); });
+  window.addEventListener('drop', function (e) { e.preventDefault(); });
+
+  contrastVal.textContent = contrastEl.value;
+})();
+</script>
+</body>
+</html>

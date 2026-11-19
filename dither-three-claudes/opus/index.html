@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1-bit Dither Print</title>
+<style>
+  :root {
+    --bg: #ecebe6;
+    --panel: #ffffff;
+    --ink: #141414;
+    --muted: #6b6b6b;
+    --line: #d6d4cc;
+    --accent: #141414;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 14px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--bg);
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .04em; text-transform: uppercase; }
+  header span { color: var(--muted); font-size: 12px; }
+  .app { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 300px;
+    flex: none;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    padding: 18px 20px 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .group { display: flex; flex-direction: column; gap: 8px; }
+  .group > label, .group > .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+  .group output { color: var(--ink); }
+  select, button, input[type=file]::file-selector-button {
+    font: inherit;
+    border: 1px solid var(--ink);
+    background: var(--panel);
+    color: var(--ink);
+    padding: 8px 10px;
+    border-radius: 0;
+    cursor: pointer;
+  }
+  select { width: 100%; }
+  button.primary {
+    background: var(--ink);
+    color: #fff;
+    width: 100%;
+    padding: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  button.primary:disabled { opacity: .35; cursor: not-allowed; }
+  button.ghost { width: 100%; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .colors { display: flex; gap: 12px; }
+  .colors label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink); text-transform: none; letter-spacing: 0; }
+  input[type=color] { width: 34px; height: 26px; border: 1px solid var(--ink); padding: 0; background: none; cursor: pointer; }
+  .drop {
+    border: 1px dashed var(--ink);
+    padding: 16px 12px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .drop strong { color: var(--ink); display: block; margin-bottom: 4px; font-size: 13px; }
+  .drop input { display: none; }
+  main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    position: relative;
+    overflow: auto;
+  }
+  main.dragging::after {
+    content: "drop the photo";
+    position: absolute;
+    inset: 12px;
+    border: 2px dashed var(--ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    background: rgba(236,235,230,.85);
+    pointer-events: none;
+  }
+  .stage {
+    background: #fff;
+    padding: 18px;
+    box-shadow: 0 1px 0 var(--line), 0 10px 30px rgba(0,0,0,.08);
+    max-width: 100%;
+    max-height: 100%;
+    display: flex;
+  }
+  canvas#out {
+    display: block;
+    max-width: 100%;
+    max-height: calc(100vh - 170px);
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  .meta { margin-top: 12px; font-size: 12px; color: var(--muted); min-height: 1.4em; text-align: center; }
+  .compare-hint { font-size: 11px; color: var(--muted); }
+  @media (max-width: 760px) {
+    .app { flex-direction: column; }
+    aside { width: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    canvas#out { max-height: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>1-bit Dither Print</h1>
+  <span>photo in, two tones out. everything runs in your browser.</span>
+</header>
+
+<div class="app">
+  <aside>
+    <div class="group">
+      <label class="drop" id="dropBox">
+        <strong>Upload a photo</strong>
+        click, drag &amp; drop, or paste
+        <input type="file" id="file" accept="image/*">
+      </label>
+    </div>
+
+    <div class="group">
+      <label for="style">Dither style</label>
+      <select id="style">
+        <optgroup label="Error diffusion">
+          <option value="floyd" selected>Floyd–Steinberg</option>
+          <option value="atkinson">Atkinson (classic Mac)</option>
+          <option value="jarvis">Jarvis–Judice–Ninke</option>
+          <option value="stucki">Stucki</option>
+          <option value="burkes">Burkes</option>
+          <option value="sierra">Sierra</option>
+          <option value="sierraLite">Sierra Lite</option>
+        </optgroup>
+        <optgroup label="Ordered">
+          <option value="bayer2">Bayer 2×2</option>
+          <option value="bayer4">Bayer 4×4</option>
+          <option value="bayer8">Bayer 8×8</option>
+          <option value="halftone">Halftone dots (45°)</option>
+          <option value="lines">Engraving lines</option>
+        </optgroup>
+        <optgroup label="Other">
+          <option value="noise">Random noise</option>
+          <option value="threshold">Hard threshold</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <div class="group">
+      <label for="contrast">Contrast <output id="contrastOut">0</output></label>
+      <input type="range" id="contrast" min="-100" max="100" value="0">
+    </div>
+
+    <div class="group">
+      <label for="brightness">Brightness <output id="brightnessOut">0</output></label>
+      <input type="range" id="brightness" min="-100" max="100" value="0">
+    </div>
+
+    <div class="group">
+      <label for="pixel">Dot size <output id="pixelOut">2 px</output></label>
+      <input type="range" id="pixel" min="1" max="8" value="2">
+    </div>
+
+    <div class="group" id="cellGroup">
+      <label for="cell">Screen size <output id="cellOut">6</output></label>
+      <input type="range" id="cell" min="3" max="16" value="6">
+    </div>
+
+    <div class="group">
+      <div class="row">
+        <label><input type="checkbox" id="invert"> Invert</label>
+        <label id="serpWrap"><input type="checkbox" id="serpentine" checked> Serpentine</label>
+      </div>
+    </div>
+
+    <div class="group">
+      <span class="label">Print colors</span>
+      <div class="colors">
+        <label><input type="color" id="ink" value="#000000"> ink</label>
+        <label><input type="color" id="paper" value="#ffffff"> paper</label>
+      </div>
+    </div>
+
+    <div class="group">
+      <button class="ghost" id="reset">Reset settings</button>
+      <button class="primary" id="download" disabled>Download PNG</button>
+      <span class="compare-hint">Hold the mouse on the print to see the original.</span>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="stage"><canvas id="out" width="600" height="400"></canvas></div>
+    <div class="meta" id="meta"></div>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MAX_SIDE = 1600; // max working resolution (dots) on the longest side
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    file: $("file"), drop: $("dropBox"), main: $("main"),
+    style: $("style"), contrast: $("contrast"), brightness: $("brightness"),
+    pixel: $("pixel"), cell: $("cell"), cellGroup: $("cellGroup"),
+    invert: $("invert"), serpentine: $("serpentine"), serpWrap: $("serpWrap"),
+    ink: $("ink"), paper: $("paper"),
+    contrastOut: $("contrastOut"), brightnessOut: $("brightnessOut"),
+    pixelOut: $("pixelOut"), cellOut: $("cellOut"),
+    reset: $("reset"), download: $("download"),
+    out: $("out"), meta: $("meta")
+  };
+
+  var DEFAULTS = {
+    style: "floyd", contrast: 0, brightness: 0, pixel: 2, cell: 6,
+    invert: false, serpentine: true, ink: "#000000", paper: "#ffffff"
+  };
+
+  var source = null;     // HTMLImageElement or canvas
+  var sourceName = "photo";
+  var isSample = true;
+  var resultBits = null; // Uint8Array, 1 = paper, 0 = ink
+  var resultW = 0, resultH = 0;
+  var grayCache = null;  // {key, w, h, data: Float32Array}
+  var pending = false;
+  var showingOriginal = false;
+
+  /* ---------- kernels ---------- */
+  var KERNELS = {
+    floyd:      { div: 16, k: [[1,0,7],[-1,1,3],[0,1,5],[1,1,1]] },
+    atkinson:   { div: 8,  k: [[1,0,1],[2,0,1],[-1,1,1],[0,1,1],[1,1,1],[0,2,1]] },
+    jarvis:     { div: 48, k: [[1,0,7],[2,0,5],[-2,1,3],[-1,1,5],[0,1,7],[1,1,5],[2,1,3],[-2,2,1],[-1,2,3],[0,2,5],[1,2,3],[2,2,1]] },
+    stucki:     { div: 42, k: [[1,0,8],[2,0,4],[-2,1,2],[-1,1,4],[0,1,8],[1,1,4],[2,1,2],[-2,2,1],[-1,2,2],[0,2,4],[1,2,2],[2,2,1]] },
+    burkes:     { div: 32, k: [[1,0,8],[2,0,4],[-2,1,2],[-1,1,4],[0,1,8],[1,1,4],[2,1,2]] },
+    sierra:     { div: 32, k: [[1,0,5],[2,0,3],[-2,1,2],[-1,1,4],[0,1,5],[1,1,4],[2,1,2],[-1,2,2],[0,2,3],[1,2,2]] },
+    sierraLite: { div: 4,  k: [[1,0,2],[-1,1,1],[0,1,1]] }
+  };
+
+  function bayer(n) {
+    // returns n×n matrix of values 0..n*n-1
+    if (n === 1) return [[0]];
+    var h = n / 2, m = bayer(h), r = [];
+    for (var y = 0; y < n; y++) {
+      r.push([]);
+      for (var x = 0; x < n; x++) {
+        var base = 4 * m[y % h][x % h];
+        var q = (y < h ? (x < h ? 0 : 2) : (x < h ? 3 : 1));
+        r[y].push(base + q);
+      }
+    }
+    return r;
+  }
+  var BAYER = { bayer2: bayer(2), bayer4: bayer(4), bayer8: bayer(8) };
+
+  /* ---------- image prep ---------- */
+  function sampleImage() {
+    var c = document.createElement("canvas");
+    c.width = 900; c.height = 600;
+    var g = c.getContext("2d");
+    var bg = g.createLinearGradient(0, 0, 900, 600);
+    bg.addColorStop(0, "#fafafa"); bg.addColorStop(1, "#202020");
+    g.fillStyle = bg; g.fillRect(0, 0, 900, 600);
+    var sun = g.createRadialGradient(300, 260, 10, 300, 260, 220);
+    sun.addColorStop(0, "#ffffff"); sun.addColorStop(0.6, "#9a9a9a"); sun.addColorStop(1, "rgba(40,40,40,0)");
+    g.fillStyle = sun; g.beginPath(); g.arc(300, 260, 220, 0, Math.PI * 2); g.fill();
+    var sph = g.createRadialGradient(620, 330, 15, 660, 380, 170);
+    sph.addColorStop(0, "#f2f2f2"); sph.addColorStop(1, "#111");
+    g.fillStyle = sph; g.beginPath(); g.arc(660, 380, 150, 0, Math.PI * 2); g.fill();
+    var bar = g.createLinearGradient(60, 0, 840, 0);
+    bar.addColorStop(0, "#000"); bar.addColorStop(1, "#fff");
+    g.fillStyle = bar; g.fillRect(60, 520, 780, 44);
+    g.fillStyle = "#000"; g.font = "bold 46px monospace";
+    g.fillText("UPLOAD A PHOTO", 70, 90);
+    return c;
+  }
+
+  function srcSize(s) {
+    return { w: s.naturalWidth || s.width, h: s.naturalHeight || s.height };
+  }
+
+  function getGray(pixel) {
+    var sz = srcSize(source);
+    var scale = 1 / pixel;
+    var w = Math.max(1, Math.round(sz.w * scale));
+    var h = Math.max(1, Math.round(sz.h * scale));
+    var longest = Math.max(w, h);
+    if (longest > MAX_SIDE) {
+      var f = MAX_SIDE / longest;
+      w = Math.max(1, Math.round(w * f));
+      h = Math.max(1, Math.round(h * f));
+    }
+    var key = w + "x" + h;
+    if (grayCache && grayCache.key === key && grayCache.src === source) return grayCache;
+
+    var c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    var g = c.getContext("2d");
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, w, h);
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = "high";
+    g.drawImage(source, 0, 0, w, h);
+    var d = g.getImageData(0, 0, w, h).data;
+    var gray = new Float32Array(w * h);
+    for (var i = 0, j = 0; j < gray.length; i += 4, j++) {
+      // linear-ish perceptual luminance (Rec. 709)
+      gray[j] = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    }
+    grayCache = { key: key, src: source, w: w, h: h, data: gray };
+    return grayCache;
+  }
+
+  function adjust(gray, contrast, brightness, invert) {
+    var out = new Float32Array(gray.length);
+    var c = contrast * 2.55; // -255..255
+    var f = (259 * (c + 255)) / (255 * (259 - c));
+    var b = brightness * 1.28;
+    for (var i = 0; i < gray.length; i++) {
+      var v = f * (gray[i] - 128) + 128 + b;
+      if (invert) v = 255 - v;
+      out[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    return out;
+  }
+
+  /* ---------- dither algorithms ---------- */
+  function diffuse(px, w, h, kernel, serpentine) {
+    var bits = new Uint8Array(w * h);
+    var k = kernel.k, div = kernel.div, n = k.length;
+    for (var y = 0; y < h; y++) {
+      var rev = serpentine && (y & 1);
+      var xs = rev ? w - 1 : 0, xe = rev ? -1 : w, step = rev ? -1 : 1;
+      for (var x = xs; x !== xe; x += step) {
+        var idx = y * w + x;
+        var old = px[idx];
+        var nw = old >= 128 ? 255 : 0;
+        bits[idx] = nw ? 1 : 0;
+        var err = (old - nw) / div;
+        if (err === 0) continue;
+        for (var t = 0; t < n; t++) {
+          var nx = x + (rev ? -k[t][0] : k[t][0]);
+          var ny = y + k[t][1];
+          if (nx < 0 || nx >= w || ny >= h) continue;
+          px[ny * w + nx] += err * k[t][2];
+        }
+      }
+    }
+    return bits;
+  }
+
+  function ordered(px, w, h, matrix) {
+    var n = matrix.length, nn = n * n;
+    var bits = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var row = matrix[y % n];
+      for (var x = 0; x < w; x++) {
+        var t = ((row[x % n] + 0.5) / nn) * 255;
+        bits[y * w + x] = px[y * w + x] > t ? 1 : 0;
+      }
+    }
+    return bits;
+  }
+
+  function halftone(px, w, h, cell) {
+    var bits = new Uint8Array(w * h);
+    var a = Math.PI / 4, ca = Math.cos(a), sa = Math.sin(a);
+    var TWO_PI = Math.PI * 2;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var u = (x * ca - y * sa) / cell;
+        var v = (x * sa + y * ca) / cell;
+        // spot function: 1 at dot centre, 0 between dots
+        var s = (Math.cos(TWO_PI * u) + Math.cos(TWO_PI * v)) * 0.25 + 0.5;
+        bits[y * w + x] = px[y * w + x] / 255 >= s ? 1 : 0;
+      }
+    }
+    return bits;
+  }
+
+  function lines(px, w, h, cell) {
+    var bits = new Uint8Array(w * h);
+    var a = Math.PI / 6, ca = Math.cos(a), sa = Math.sin(a);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var v = (x * sa + y * ca) / cell;
+        var f = v - Math.floor(v);            // 0..1 across the line period
+        var s = 1 - Math.abs(f - 0.5) * 2;    // 1 at line centre, 0 at edges
+        bits[y * w + x] = px[y * w + x] / 255 >= s ? 1 : 0;
+      }
+    }
+    return bits;
+  }
+
+  function noise(px, w, h) {
+    var bits = new Uint8Array(w * h);
+    // seeded PRNG so the pattern stays stable while you drag sliders
+    var seed = 1234567;
+    for (var i = 0; i < bits.length; i++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      bits[i] = px[i] > (seed / 4294967296) * 255 ? 1 : 0;
+    }
+    return bits;
+  }
+
+  function threshold(px, w, h) {
+    var bits = new Uint8Array(w * h);
+    for (var i = 0; i < bits.length; i++) bits[i] = px[i] >= 128 ? 1 : 0;
+    return bits;
+  }
+
+  /* ---------- render ---------- */
+  function hexToRgb(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function settings() {
+    return {
+      style: els.style.value,
+      contrast: +els.contrast.value,
+      brightness: +els.brightness.value,
+      pixel: +els.pixel.value,
+      cell: +els.cell.value,
+      invert: els.invert.checked,
+      serpentine: els.serpentine.checked,
+      ink: els.ink.value,
+      paper: els.paper.value
+    };
+  }
+
+  function updateLabels(s) {
+    els.contrastOut.textContent = (s.contrast > 0 ? "+" : "") + s.contrast;
+    els.brightnessOut.textContent = (s.brightness > 0 ? "+" : "") + s.brightness;
+    els.pixelOut.textContent = s.pixel + " px";
+    els.cellOut.textContent = s.cell;
+    var usesCell = s.style === "halftone" || s.style === "lines";
+    els.cellGroup.style.display = usesCell ? "" : "none";
+    els.serpWrap.style.visibility = KERNELS[s.style] ? "visible" : "hidden";
+  }
+
+  function render() {
+    pending = false;
+    if (!source) return;
+    var s = settings();
+    updateLabels(s);
+    var g = getGray(s.pixel);
+    var w = g.w, h = g.h;
+    var px = adjust(g.data, s.contrast, s.brightness, s.invert);
+    var bits;
+    if (KERNELS[s.style]) bits = diffuse(px, w, h, KERNELS[s.style], s.serpentine);
+    else if (BAYER[s.style]) bits = ordered(px, w, h, BAYER[s.style]);
+    else if (s.style === "halftone") bits = halftone(px, w, h, s.cell);
+    else if (s.style === "lines") bits = lines(px, w, h, s.cell);
+    else if (s.style === "noise") bits = noise(px, w, h);
+    else bits = threshold(px, w, h);
+
+    resultBits = bits; resultW = w; resultH = h;
+    paint();
+
+    var sz = srcSize(source);
+    els.meta.textContent = (isSample ? "sample image · " : sourceName + " · ") +
+      w + "×" + h + " dots · PNG export " + (w * s.pixel) + "×" + (h * s.pixel) +
+      (sz.w !== w * s.pixel ? " (source " + sz.w + "×" + sz.h + ")" : "");
+    els.download.disabled = false;
+  }
+
+  function paint() {
+    if (!resultBits) return;
+    var s = settings();
+    var ink = hexToRgb(s.ink), paper = hexToRgb(s.paper);
+    var c = els.out;
+    c.width = resultW; c.height = resultH;
+    var g = c.getContext("2d");
+    if (showingOriginal) {
+      g.imageSmoothingEnabled = true;
+      g.drawImage(source, 0, 0, resultW, resultH);
+      return;
+    }
+    var img = g.createImageData(resultW, resultH);
+    var d = img.data;
+    for (var i = 0, j = 0; i < resultBits.length; i++, j += 4) {
+      var col = resultBits[i] ? paper : ink;
+      d[j] = col[0]; d[j + 1] = col[1]; d[j + 2] = col[2]; d[j + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+  }
+
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(render);
+  }
+
+  /* ---------- download ---------- */
+  function download() {
+    if (!resultBits) return;
+    var s = settings();
+    var scale = s.pixel;
+    while (scale > 1 && Math.max(resultW, resultH) * scale > 10000) scale--;
+    var wasOriginal = showingOriginal;
+    showingOriginal = false;
+    paint();
+    var c = document.createElement("canvas");
+    c.width = resultW * scale; c.height = resultH * scale;
+    var g = c.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    g.drawImage(els.out, 0, 0, c.width, c.height);
+    if (wasOriginal) { showingOriginal = true; paint(); }
+    var base = (isSample ? "sample" : sourceName.replace(/\.[^.]+$/, "")) || "photo";
+    var name = base + "-1bit-" + s.style + ".png";
+    c.toBlob(function (blob) {
+      if (!blob) return;
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    }, "image/png");
+  }
+
+  /* ---------- loading ---------- */
+  function loadFile(file) {
+    if (!file || !/^image\//.test(file.type)) {
+      els.meta.textContent = "That file isn't an image.";
+      return;
+    }
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      source = img; sourceName = file.name || "photo"; isSample = false;
+      grayCache = null;
+      schedule();
+    };
+    img.onerror = function () {
+      els.meta.textContent = "Couldn't read that image (try JPG or PNG).";
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  els.file.addEventListener("change", function () {
+    if (els.file.files && els.file.files[0]) loadFile(els.file.files[0]);
+    els.file.value = "";
+  });
+
+  var dragDepth = 0;
+  window.addEventListener("dragenter", function (e) { e.preventDefault(); dragDepth++; els.main.classList.add("dragging"); });
+  window.addEventListener("dragleave", function (e) { e.preventDefault(); dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) els.main.classList.remove("dragging"); });
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) {
+    e.preventDefault(); dragDepth = 0; els.main.classList.remove("dragging");
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+  window.addEventListener("paste", function (e) {
+    var items = (e.clipboardData && e.clipboardData.items) || [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image/") === 0) { loadFile(items[i].getAsFile()); break; }
+    }
+  });
+
+  ["style", "contrast", "brightness", "pixel", "cell", "invert", "serpentine"].forEach(function (k) {
+    els[k].addEventListener("input", schedule);
+    els[k].addEventListener("change", schedule);
+  });
+  ["ink", "paper"].forEach(function (k) {
+    els[k].addEventListener("input", paint);
+  });
+
+  els.reset.addEventListener("click", function () {
+    els.style.value = DEFAULTS.style;
+    els.contrast.value = DEFAULTS.contrast;
+    els.brightness.value = DEFAULTS.brightness;
+    els.pixel.value = DEFAULTS.pixel;
+    els.cell.value = DEFAULTS.cell;
+    els.invert.checked = DEFAULTS.invert;
+    els.serpentine.checked = DEFAULTS.serpentine;
+    els.ink.value = DEFAULTS.ink;
+    els.paper.value = DEFAULTS.paper;
+    schedule();
+  });
+  els.download.addEventListener("click", download);
+
+  // hold to compare with the original
+  function showOrig(on) {
+    if (!resultBits || showingOriginal === on) return;
+    showingOriginal = on; paint();
+  }
+  els.out.addEventListener("pointerdown", function () { showOrig(true); });
+  window.addEventListener("pointerup", function () { showOrig(false); });
+  els.out.addEventListener("pointerleave", function () { showOrig(false); });
+
+  // start with a generated sample so the controls do something right away
+  source = sampleImage();
+  isSample = true;
+  schedule();
+})();
+</script>
+</body>
+</html>
