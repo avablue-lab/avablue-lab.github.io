@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Neon Glide</title>
+<style>
+  html,body{margin:0;height:100%;background:#05030c;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
+</style>
+</head>
+<body>
+<canvas id="c" width="192" height="128"></canvas>
+<script>
+(() => {
+  "use strict";
+
+  // ---------- constants ----------
+  const W = 192, H = 128;
+  const G = 0.14, FLAP = -2.0, MAXV = 3.2, SPEED = 1.25;
+  const PX = 48, SPACING = 80, GROUND = H - 4;
+  const DEMO_SEED = 20261119, FPS = 60;
+  const NEON = ['#38f0ff', '#ff3fd6', '#9dff4a', '#ffb03a', '#b18cff'];
+  const WORDS = ['BAR', 'HOTEL', 'NOODLE', '24H', 'ARCADE', 'CAFE', 'RAMEN', 'NEON', 'TAXI', 'KARAOKE', 'AI', 'CLUB'];
+  const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  // ---------- deterministic random ----------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function hash(a, b) {
+    let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul((b | 0) + 0x9e3779b9, 0x165667b1);
+    h ^= h >>> 15; h = Math.imul(h, 0x85ebca6b);
+    h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  }
+
+  // ---------- 3x5 pixel font ----------
+  const FONT = {};
+  ('0:111101101101111,1:010110010010111,2:111001111100111,3:111001111001111,4:101101111001001,' +
+   '5:111100111001111,6:111100111101111,7:111001001010010,8:111101111101111,9:111101111001111,' +
+   'A:010101111101101,B:110101110101110,C:011100100100011,D:110101101101110,E:111100110100111,' +
+   'F:111100110100100,G:011100101101011,H:101101111101101,I:111010010010111,J:001001001101010,' +
+   'K:101101110101101,L:100100100100111,M:101111111101101,N:110101101101101,O:010101101101010,' +
+   'P:110101110100100,Q:010101101110011,R:110101110101101,S:011100010001110,T:111010010010010,' +
+   'U:101101101101111,V:101101101101010,W:101101111111101,X:101101010101101,Y:101101010010010,' +
+   'Z:111001010100111,::000010000010000,.:000000000000010,=:000111000111000,-:000000111000000,' +
+   '/:001001010100100').split(',').forEach(e => { FONT[e[0]] = e.slice(2); });
+
+  function glyphs(str, x, y, sc) {
+    for (let i = 0; i < str.length; i++) {
+      const g = FONT[str[i]];
+      if (!g) continue;
+      for (let p = 0; p < 15; p++) {
+        if (g[p] === '1') ctx.fillRect(x + i * 4 * sc + (p % 3) * sc, y + Math.floor(p / 3) * sc, sc, sc);
+      }
+    }
+  }
+  function textW(str, sc) { return (str.length * 4 - 1) * sc; }
+  function text(str, x, y, col, sc) {
+    sc = sc || 1;
+    if (x === 'c') x = Math.floor((W - textW(str, sc)) / 2);
+    ctx.fillStyle = '#05030c'; glyphs(str, x + sc, y + sc, sc);
+    ctx.fillStyle = col; glyphs(str, x, y, sc);
+  }
+
+  // ---------- static sky (dithered gradient + moon) ----------
+  const SKY = ['#07041a', '#0e0828', '#170b38', '#241046', '#351354', '#4a1660', '#661a68'];
+  const sky = document.createElement('canvas');
+  sky.width = W; sky.height = H;
+  (function buildSky() {
+    const g = sky.getContext('2d');
+    for (let y = 0; y < H; y++) {
+      const f = Math.min(1, y / (H - 20)) * (SKY.length - 1);
+      const b = Math.floor(f), fr = f - b;
+      for (let x = 0; x < W; x++) {
+        const th = BAYER[(y & 3) * 4 + (x & 3)] / 16;
+        g.fillStyle = SKY[Math.min(SKY.length - 1, b + (fr > th ? 1 : 0))];
+        g.fillRect(x, y, 1, 1);
+      }
+    }
+    const mx = 152, my = 22;
+    for (let dy = -9; dy <= 9; dy++) for (let dx = -9; dx <= 9; dx++) {
+      const d = dx * dx + dy * dy;
+      if (d <= 49) {
+        g.fillStyle = (d > 30 && dx < 0) ? '#e8cfa6' : '#ffeccc';
+        g.fillRect(mx + dx, my + dy, 1, 1);
+      } else if (d <= 81 && BAYER[((my + dy) & 3) * 4 + ((mx + dx) & 3)] < 4) {
+        g.fillStyle = '#5a2a6e';
+        g.fillRect(mx + dx, my + dy, 1, 1);
+      }
+    }
+    g.fillStyle = '#e2c79c';
+    [[2, -2], [3, -2], [-2, 2], [1, 3], [2, 3], [-3, -3]].forEach(c => g.fillRect(mx + c[0], my + c[1], 1, 1));
+  })();
+
+  // ---------- game state ----------
+  function newState(seed, t) {
+    const s = {
+      seed: seed, rng: mulberry32(seed), mode: 'ready', t: t || 0, t0: t || 0,
+      cam: 0, bg: 0, y: H / 2 - 8, vy: 0, score: 0, obs: [], nextI: 0, prevC: H / 2,
+      deadT: 0, crashX: 0, crashY: 0, trail: [], run: 0
+    };
+    genObs(s);
+    return s;
+  }
+
+  function genObs(s) {
+    while (s.obs.length === 0 || s.obs[s.obs.length - 1].x < s.cam + W + 60) {
+      const i = s.nextI++, r = s.rng;
+      const gap = Math.max(40, 54 - Math.floor(i / 2));
+      const w = 18 + Math.floor(r() * 13);
+      const lo = 12 + gap / 2, hi = H - 22 - gap / 2;
+      let c = s.prevC + (r() * 2 - 1) * 28;
+      if (i === 0) c = H / 2;
+      c = Math.max(lo, Math.min(hi, c));
+      s.prevC = c;
+      const gapTop = Math.round(c - gap / 2), gapBot = Math.round(c + gap / 2);
+      const antH = r() < 0.65 ? 5 + Math.floor(r() * 8) : 0;
+      const ax = 3 + Math.floor(r() * (w - 7));
+      const hue = Math.floor(r() * NEON.length);
+      const word = WORDS[Math.floor(r() * WORDS.length)];
+      s.obs.push({ i, x: W + 40 + i * SPACING, w, gapTop, gapBot, roof: gapBot + antH, antH, ax, hue, word, passed: false });
+    }
+    while (s.obs.length && s.obs[0].x + s.obs[0].w < s.cam - 20) s.obs.shift();
+  }
+
+  function rectHit(a, b, c, d, e, f, g, h) { return a < g && c > e && b < h && d > f; }
+
+  function hits(s) {
+    const L = s.cam + PX - 4, R = s.cam + PX + 4, T = s.y - 2, B = s.y + 2;
+    if (B >= GROUND) return true;
+    for (const o of s.obs) {
+      if (o.x > R || o.x + o.w < L) continue;
+      if (rectHit(L, T, R, B, o.x, o.roof, o.x + o.w, H)) return true;                       // rooftop / building
+      if (o.antH && rectHit(L, T, R, B, o.x + o.ax, o.gapBot, o.x + o.ax + 2, o.roof)) return true; // antenna
+      if (rectHit(L, T, R, B, o.x + 2, -50, o.x + o.w - 2, o.gapTop)) return true;           // hanging sign
+    }
+    return false;
+  }
+
+  function step(s, flap) {
+    s.t++;
+    if (s.mode === 'ready') {
+      s.bg += SPEED * 0.5;
+      s.y = H / 2 - 8 + Math.sin((s.t - s.t0) * 0.08) * 3;
+      if (!flap) return;
+      s.mode = 'play';
+    }
+    if (s.mode === 'play') {
+      if (flap) s.vy = FLAP;
+      s.vy = Math.min(MAXV, s.vy + G);
+      s.y += s.vy;
+      if (s.y < 3) { s.y = 3; s.vy = 0; }
+      s.cam += SPEED; s.bg += SPEED;
+      genObs(s);
+      for (const o of s.obs) {
+        if (!o.passed && o.x + o.w < s.cam + PX - 4) { o.passed = true; s.score++; }
+      }
+      s.trail.push(s.y);
+      if (s.trail.length > 14) s.trail.shift();
+      if (hits(s)) { s.mode = 'dead'; s.deadT = 0; s.crashX = s.cam + PX; s.crashY = s.y; }
+      return;
+    }
+    // dead
+    s.deadT++;
+    if (s.trail.length) s.trail.shift();
+  }
+
+  // ---------- autopilot (demo) ----------
+  function autopilot(s) {
+    if (s.mode === 'ready') return s.t - s.t0 >= 40;
+    if (s.mode !== 'play') return false;
+    const L = s.cam + PX - 4;
+    let o = null;
+    for (const q of s.obs) { if (q.x + q.w >= L) { o = q; break; } }
+    const target = o ? (o.gapTop + o.gapBot) / 2 + 6 : H / 2;
+    return s.y > target && s.vy > -0.6;
+  }
+
+  // ---------- drawing ----------
+  function drawStars(s) {
+    for (let k = 0; k < 46; k++) {
+      const x = Math.floor(((hash(k, 1) * W - s.bg * 0.05) % W + W) % W);
+      const y = Math.floor(hash(k, 2) * 72);
+      const tw = hash(k, 3) > 0.6 && ((s.t >> 4) + k) % 5 === 0;
+      ctx.fillStyle = tw ? '#6a5a9a' : (hash(k, 4) > 0.8 ? '#ffffff' : '#b8b0e0');
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  function drawFar(s) {
+    const off = Math.floor(s.bg * 0.2), cw = 9;
+    for (let j = Math.floor(off / cw) - 1; j <= Math.floor((off + W) / cw) + 1; j++) {
+      const h = 22 + Math.floor(hash(j, 11) * 34), w = cw + (hash(j, 12) < 0.3 ? 3 : 0);
+      const sx = j * cw - off, top = GROUND - h;
+      ctx.fillStyle = '#24113f';
+      ctx.fillRect(sx, top, w, h);
+      if (hash(j, 13) < 0.25) ctx.fillRect(sx + (w >> 1), top - 5, 1, 5);
+      ctx.fillStyle = '#5b3a86';
+      for (let yy = top + 3; yy < GROUND - 2; yy += 3)
+        for (let xx = 1; xx < w - 1; xx += 2)
+          if (hash(j * 53 + xx, yy) > 0.9) ctx.fillRect(sx + xx, yy, 1, 1);
+    }
+  }
+
+  function drawMid(s) {
+    const off = Math.floor(s.bg * 0.5), cw = 15;
+    for (let j = Math.floor(off / cw) - 2; j <= Math.floor((off + W) / cw) + 1; j++) {
+      const h = 14 + Math.floor(hash(j, 21) * 42), w = 10 + Math.floor(hash(j, 22) * 9);
+      const sx = j * cw - off + Math.floor(hash(j, 23) * 4), top = GROUND - h;
+      ctx.fillStyle = '#150a2c'; ctx.fillRect(sx, top, w, h);
+      ctx.fillStyle = '#22123f'; ctx.fillRect(sx, top, 1, h);
+      if (hash(j, 24) < 0.35) {
+        ctx.fillStyle = NEON[Math.floor(hash(j, 25) * NEON.length)];
+        ctx.globalAlpha = 0.55; ctx.fillRect(sx, top, w, 1); ctx.globalAlpha = 1;
+      }
+      for (let yy = top + 3; yy < GROUND - 3; yy += 3)
+        for (let xx = 2; xx < w - 2; xx += 3) {
+          const v = hash(j * 71 + xx, yy * 3 + 1);
+          if (v > 0.72) {
+            ctx.fillStyle = v > 0.95 ? '#7af0ff' : v > 0.9 ? '#ff8ae0' : '#c9a45a';
+            ctx.fillRect(sx + xx, yy, 1, 1);
+          }
+        }
+    }
+    ctx.fillStyle = 'rgba(255,60,200,0.08)';
+    ctx.fillRect(0, GROUND - 14, W, 14);
+  }
+
+  function drawGround(s) {
+    ctx.fillStyle = '#0a0614'; ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#ff3fd6'; ctx.fillRect(0, GROUND, W, 1);
+    ctx.fillStyle = '#ffd27a';
+    const go = Math.floor(s.bg) % 10;
+    for (let x = -go; x < W; x += 10) ctx.fillRect(x, GROUND + 2, 4, 1);
+  }
+
+  function drawObstacle(s, o) {
+    const sx = Math.floor(o.x - s.cam);
+    if (sx > W || sx + o.w < 0) return;
+    const neon = NEON[o.hue];
+    // building
+    ctx.fillStyle = '#100822'; ctx.fillRect(sx, o.roof, o.w, GROUND - o.roof);
+    ctx.fillStyle = '#1d1040'; ctx.fillRect(sx, o.roof, 1, GROUND - o.roof);
+    ctx.fillStyle = neon; ctx.fillRect(sx, o.roof, o.w, 1);
+    ctx.globalAlpha = 0.5; ctx.fillRect(sx + o.w - 1, o.roof, 1, GROUND - o.roof); ctx.globalAlpha = 1;
+    let row = 0;
+    for (let wy = o.roof + 4; wy < GROUND - 3; wy += 4, row++) {
+      let col = 0;
+      for (let wx = sx + 3; wx < sx + o.w - 4; wx += 4, col++) {
+        const v = hash(o.i * 97 + col, row + 7);
+        if (v > 0.5) {
+          ctx.fillStyle = v > 0.93 ? neon : v > 0.75 ? '#ffd27a' : '#6b4a2a';
+          ctx.fillRect(wx, wy, 2, 2);
+        }
+      }
+    }
+    // antenna
+    if (o.antH) {
+      const ax = sx + o.ax;
+      ctx.fillStyle = '#3a3552'; ctx.fillRect(ax - 1, o.roof - 2, 4, 2);
+      ctx.fillStyle = '#9a9ab8'; ctx.fillRect(ax, o.gapBot, 1, o.antH);
+      ctx.fillStyle = '#5a5a78'; ctx.fillRect(ax + 1, o.gapBot, 1, o.antH);
+      const on = (s.t + o.i * 13) % 50 < 25;
+      ctx.fillStyle = on ? '#ff2a3a' : '#5a1018';
+      ctx.fillRect(ax, o.gapBot, 2, 2);
+      if (on) { ctx.globalAlpha = 0.3; ctx.fillRect(ax - 1, o.gapBot - 1, 4, 4); ctx.globalAlpha = 1; }
+    }
+    // hanging vertical neon sign
+    const bx = sx + 2, bw = o.w - 4;
+    ctx.fillStyle = '#1a0b2c'; ctx.fillRect(bx, 0, bw, o.gapTop);
+    ctx.fillStyle = neon;
+    ctx.fillRect(bx, 0, 1, o.gapTop);
+    ctx.fillRect(bx + bw - 1, 0, 1, o.gapTop);
+    ctx.fillRect(bx, o.gapTop - 1, bw, 1);
+    const n = Math.min(o.word.length, Math.floor((o.gapTop - 4) / 6));
+    if (n > 0) {
+      const flicker = hash(o.i, s.t >> 2) < 0.04;
+      ctx.globalAlpha = flicker ? 0.3 : 1;
+      const lx = bx + Math.floor(bw / 2) - 1, ly = o.gapTop - 3 - n * 6 + 1;
+      for (let k = 0; k < n; k++) glyphs(o.word[k], lx, ly + k * 6, 1);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  const PLANE = ['WW.......', '.WWWW....', '..WWWWWWW', '.SSSS....', 'SS.......'];
+  function drawPlane(s) {
+    // trail
+    for (let k = 0; k < s.trail.length; k++) {
+      const age = s.trail.length - 1 - k;
+      if (age === 0) continue;
+      ctx.globalAlpha = 0.5 * (1 - age / 14);
+      ctx.fillStyle = '#7af0ff';
+      ctx.fillRect(Math.round(PX - 5 - age * SPEED), Math.round(s.trail[k]), 1, 1);
+    }
+    ctx.globalAlpha = 1;
+    const dir = s.mode === 'play' ? (s.vy < -0.8 ? -1 : s.vy > 1.2 ? 1 : 0) : 0;
+    const x0 = PX - 4, y0 = Math.round(s.y) - 2;
+    for (let r = 0; r < 5; r++) for (let c = 0; c < 9; c++) {
+      const p = PLANE[r][c];
+      if (p === '.') continue;
+      ctx.fillStyle = p === 'W' ? '#f4f4ff' : '#a9b4d8';
+      ctx.fillRect(x0 + c, y0 + r + dir * (Math.floor(c / 3) - 1), 1, 1);
+    }
+  }
+
+  function drawCrash(s) {
+    const dt = s.deadT;
+    if (dt > 70) return;
+    ctx.globalAlpha = dt < 40 ? 1 : 1 - (dt - 40) / 30;
+    for (let k = 0; k < 18; k++) {
+      const a = hash(k, s.seed) * Math.PI * 2;
+      const sp = 0.4 + hash(k, s.seed + 1) * 1.2;
+      const x = s.crashX - s.cam + Math.cos(a) * sp * dt;
+      const y = Math.min(GROUND - 1, s.crashY + Math.sin(a) * sp * dt + 0.03 * dt * dt);
+      ctx.fillStyle = k < 6 ? '#f4f4ff' : NEON[k % NEON.length];
+      ctx.fillRect(Math.round(x), Math.round(y), k < 6 ? 2 : 1, 1);
+    }
+    if (dt < 6) {
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = 0.6 * (1 - dt / 6);
+      ctx.fillRect(Math.round(s.crashX - s.cam) - 6, Math.round(s.crashY) - 6, 12, 12);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function draw(s, demoT) {
+    ctx.drawImage(sky, 0, 0);
+    drawStars(s);
+    drawFar(s);
+    drawMid(s);
+    for (const o of s.obs) drawObstacle(s, o);
+    drawGround(s);
+    if (s.mode === 'dead') drawCrash(s); else drawPlane(s);
+
+    // HUD
+    if (s.mode !== 'ready') text(String(s.score), 'c', 4, '#ffffff', 2);
+    if (demoT !== undefined) {
+      text('DEMO', 3, 3, '#ffd27a', 1);
+      text('T=' + demoT.toFixed(2), 3, 10, '#ffd27a', 1);
+      if (s.mode === 'dead') text('CRASH', 'c', 44, '#ff3fd6', 2);
+      return;
+    }
+    if (s.mode === 'ready') {
+      text('NEON GLIDE', 'c', 28, '#38f0ff', 2);
+      text('TAP OR SPACE TO FLY', 'c', 50, '#ffffff', 1);
+      if (best > 0) text('BEST ' + best, 'c', 60, '#ffd27a', 1);
+    } else if (s.mode === 'dead') {
+      text('CRASH', 'c', 38, '#ff3fd6', 2);
+      text('SCORE ' + s.score + '  BEST ' + best, 'c', 56, '#ffffff', 1);
+      if (s.deadT > 30 && (s.t >> 5) % 2 === 0) text('TAP TO RETRY', 'c', 68, '#38f0ff', 1);
+    }
+  }
+
+  // ---------- scaling ----------
+  function fit() {
+    const k = Math.min(innerWidth / W, innerHeight / H);
+    const sc = k >= 1 ? Math.floor(k) : k;
+    cv.style.width = W * sc + 'px';
+    cv.style.height = H * sc + 'px';
+  }
+  addEventListener('resize', fit);
+  fit();
+
+  // ---------- best score ----------
+  let best = 0;
+  try { best = parseInt(localStorage.getItem('neonGlideBest') || '0', 10) || 0; } catch (e) { best = 0; }
+  function saveBest(v) {
+    if (v <= best) return;
+    best = v;
+    try { localStorage.setItem('neonGlideBest', String(v)); } catch (e) { /* ignore */ }
+  }
+
+  // ---------- demo mode (#t=<seconds>) ----------
+  function parseT() {
+    const m = /(?:^#|[#&])t=([0-9]*\.?[0-9]+)/.exec(location.hash);
+    return m ? parseFloat(m[1]) : null;
+  }
+  function demoState(run, t) {
+    const s = newState((DEMO_SEED + run * 7919) | 0, t);
+    s.run = run;
+    return s;
+  }
+  let dState = null, dFrame = 0;
+  function advanceDemo(s) {
+    if (s.mode === 'dead' && s.deadT >= 90) {
+      const n = demoState(s.run + 1, s.t);
+      n.bg = s.bg;
+      s = n;
+    }
+    step(s, autopilot(s));
+    return s;
+  }
+  function renderDemo(t) {
+    const target = Math.min(FPS * 3600 * 6, Math.max(0, Math.floor(t * FPS + 1e-6)));
+    if (!dState || target < dFrame) { dState = demoState(0, 0); dFrame = 0; }
+    while (dFrame < target) { dState = advanceDemo(dState); dFrame++; }
+    draw(dState, t);
+  }
+  window.renderAt = renderDemo; // renderAt(seconds) draws that exact demo moment
+
+  // ---------- play mode ----------
+  let s = null, pending = false, running = false, acc = 0, last = 0;
+  function randSeed() { return (Math.random() * 0x7fffffff) | 0; }
+  function tick() {
+    const f = pending; pending = false;
+    if (s.mode === 'dead') {
+      if (f && s.deadT > 30) {
+        const bg = s.bg;
+        s = newState(randSeed(), s.t);
+        s.bg = bg;
+        step(s, true);
+      } else step(s, false);
+    } else {
+      step(s, f);
+      if (s.mode === 'dead') saveBest(s.score);
+    }
+  }
+  function loop(now) {
+    if (parseT() !== null) { running = false; return; }
+    acc += Math.min(250, now - last); last = now;
+    const dt = 1000 / FPS;
+    while (acc >= dt) { tick(); acc -= dt; }
+    draw(s);
+    requestAnimationFrame(loop);
+  }
+  function startPlay() {
+    if (running) return;
+    running = true;
+    if (!s) s = newState(randSeed(), 0);
+    last = performance.now(); acc = 0;
+    requestAnimationFrame(loop);
+  }
+
+  function press(e) {
+    if (parseT() !== null) return;
+    pending = true;
+    if (e && e.cancelable) e.preventDefault();
+  }
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') {
+      if (!e.repeat) press(e); else e.preventDefault();
+    }
+  });
+  addEventListener('pointerdown', press, { passive: false });
+
+  function route() {
+    const t = parseT();
+    if (t !== null) renderDemo(t); else startPlay();
+  }
+  addEventListener('hashchange', route);
+  route();
+})();
+</script>
+</body>
+</html>

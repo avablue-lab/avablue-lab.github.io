@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Neon Glide</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05030c; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; touch-action: none; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="192" height="108"></canvas>
+<script>
+"use strict";
+// ---- constants (fixed 60 Hz simulation; world units = screen pixels) ----
+const W = 192, H = 108, STEP = 1 / 60;
+const GRAV = 0.055, FLAP = -1.25, MAXFALL = 1.9, SPEED = 0.9;
+const PX = 46;                       // plane's fixed screen x
+const TOPY = 9;                      // ceiling = bottom of the HUD bar
+const cv = document.getElementById("c"), g = cv.getContext("2d");
+
+// ---- seeded random (mulberry32) + stable hash for decoration ----
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hash(a, b, c) {
+  let h = Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 2147483647);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// ---- 3x5 pixel font ----
+const FONT = {
+  "0":"111101101101111","1":"010110010010111","2":"111001111100111","3":"111001111001111",
+  "4":"101101111001001","5":"111100111001111","6":"111100111101111","7":"111001010010010",
+  "8":"111101111101111","9":"111101111001111","A":"010101111101101","B":"110101110101110",
+  "C":"011100100100011","D":"110101101101110","E":"111100110100111","F":"111100110100100",
+  "G":"011100101101011","H":"101101111101101","I":"111010010010111","J":"001001001101010",
+  "K":"101101110101101","L":"100100100100111","M":"101111111101101","N":"110101101101101",
+  "O":"010101101101010","P":"110101110100100","Q":"010101101110011","R":"110101110101101",
+  "S":"011100010001110","T":"111010010010010","U":"101101101101111","V":"101101101101010",
+  "W":"101101111111101","X":"101101010101101","Y":"101101010010010","Z":"111001010100111",
+  " ":"000000000000000",":":"000010000010000","/":"001001010100100","-":"000000111000000"
+};
+function text(s, x, y, col, scale) {
+  scale = scale || 1;
+  g.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const f = FONT[s[i]] || FONT[" "];
+    for (let p = 0; p < 15; p++) if (f[p] === "1")
+      g.fillRect(x + i * 4 * scale + (p % 3) * scale, y + ((p / 3) | 0) * scale, scale, scale);
+  }
+}
+function textW(s, scale) { return (s.length * 4 - 1) * (scale || 1); }
+function textC(s, y, col, scale, shadow) {
+  const x = ((W - textW(s, scale)) / 2) | 0;
+  g.fillStyle = "rgba(5,3,12,0.6)";                    // backing plate so stars don't break the letters
+  g.fillRect(x - 3, y - 2, textW(s, scale) + 6, 5 * (scale || 1) + 5);
+  if (shadow) text(s, x + 1, y + 1, shadow, scale);
+  text(s, x, y, col, scale);
+}
+
+// ---- game state ----
+const NEON = ["#ff3fd2", "#29f0ff", "#ffe14a", "#7dff6a", "#b26bff"];
+let S;            // current run
+let runNo = 0;    // runs so far (each run gets its own seed)
+let best = 0;
+
+function newRun(seed) {
+  const r = rng(seed);
+  S = { r, frame: 0, scroll: 0, y: 44, vy: 0, dead: false, deadAt: 0,
+        score: 0, buildings: [], nextX: W + 30, nextId: 0, parts: [], started: false };
+  while (S.nextX < S.scroll + W + 60) addBuilding();
+}
+function addBuilding() {
+  const r = S.r, b = { id: S.nextId++, x: S.nextX };
+  const lvl = Math.min(1, S.nextId / 25);             // gets harder over the first 25 buildings
+  b.w = 14 + ((r() * 14) | 0);
+  b.top = H - (22 + ((r() * (44 + 18 * lvl)) | 0));    // roof y
+  b.col = NEON[(r() * NEON.length) | 0];
+  b.ants = [];
+  if (r() < 0.55 + 0.25 * lvl) {
+    const n = r() < 0.3 ? 2 : 1;
+    for (let k = 0; k < n; k++) {
+      const h = Math.min(7 + ((r() * (8 + 8 * lvl)) | 0), b.top - 26);   // always leave a flyable gap under the HUD
+      let dx = 2 + ((r() * (b.w - 5)) | 0);
+      if (b.ants.length && Math.abs(dx - b.ants[0].dx) < 4)        // keep two masts apart
+        dx = b.ants[0].dx + (b.ants[0].dx + 4 <= b.w - 3 ? 4 : -4);
+      if (h >= 4 && dx >= 1) b.ants.push({ dx, h });
+    }
+  }
+  b.sign = r() < 0.35 ? NEON[(r() * NEON.length) | 0] : null;
+  b.passed = false;
+  S.buildings.push(b);
+  S.nextX += b.w + 12 + ((r() * (26 - 8 * lvl)) | 0);
+}
+// highest solid point (smallest y) of a building between world x0..x1
+function obstacleTop(b, x0, x1) {
+  let top = H + 10;
+  if (x1 >= b.x && x0 <= b.x + b.w) top = b.top;
+  for (const a of b.ants) {
+    const ax = b.x + a.dx;
+    if (x1 >= ax && x0 <= ax + 1) top = Math.min(top, b.top - a.h);
+  }
+  return top;
+}
+function flap() {
+  if (S.dead) return;
+  S.started = true;
+  S.vy = FLAP;
+}
+function crash() {
+  S.dead = true; S.deadAt = S.frame;
+  best = Math.max(best, S.score);
+  for (let i = 0; i < 18; i++) {
+    const a = S.r() * Math.PI * 2, v = 0.4 + S.r() * 1.4;
+    S.parts.push({ x: PX + 3, y: S.y, vx: Math.cos(a) * v - 0.4, vy: Math.sin(a) * v - 0.6,
+                   c: i % 3 ? "#ffffff" : NEON[i % NEON.length] });
+  }
+}
+function step() {
+  S.frame++;
+  for (const p of S.parts) { p.x += p.vx; p.y += p.vy; p.vy += 0.05; }
+  if (S.dead) { if (S.y < H - 3) { S.vy = Math.min(S.vy + GRAV * 2, 2.5); S.y += S.vy; } return; }
+  if (!S.started) { S.y = 44 + Math.sin(S.frame / 12) * 2; return; }
+  S.scroll += SPEED;
+  S.vy = Math.min(S.vy + GRAV, MAXFALL);
+  S.y += S.vy;
+  while (S.nextX < S.scroll + W + 60) addBuilding();
+  S.buildings = S.buildings.filter(b => b.x + b.w > S.scroll - 10);
+  // plane hitbox: 7x3 around (PX, y)
+  const x0 = S.scroll + PX, x1 = x0 + 6, y0 = S.y - 1, y1 = S.y + 1;
+  if (y0 < TOPY || y1 >= H) return crash();
+  for (const b of S.buildings) {
+    if (obstacleTop(b, x0, x1) <= y1) return crash();
+    if (!b.passed && b.x + b.w < x0) { b.passed = true; S.score++; }
+  }
+}
+
+// ---- autopilot (demo mode): climb when below a safe line over what's coming ----
+function autopilot() {
+  if (S.dead) return;
+  const x0 = S.scroll + PX - 2, x1 = x0 + 44;
+  let top = H - 4;                                  // street
+  for (const b of S.buildings) top = Math.min(top, obstacleTop(b, x0, x1));
+  const target = Math.max(TOPY + 7, Math.min(60, top - 11));   // cruise mid-sky when the way is clear
+  if (!S.started || (S.y > target && S.vy > -0.2)) flap();
+}
+
+// ---- drawing ----
+function drawSky() {
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, "#0a0620"); gr.addColorStop(0.6, "#1d0b3a"); gr.addColorStop(1, "#3a0f4a");
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  // stars (slow parallax, twinkle by frame)
+  const sx = Math.floor(S.scroll * 0.05);
+  for (let i = 0; i < 60; i++) {
+    const x = ((hash(i, 1, 7) * 400 - sx) % 400 + 400) % 400, y = 10 + ((hash(i, 2, 7) * 58) | 0);
+    if (x >= W) continue;
+    const tw = hash(i, Math.floor(S.frame / 20), 3) < 0.15;
+    g.fillStyle = tw ? "#6a5a8a" : (hash(i, 3, 7) < 0.3 ? "#ffffff" : "#b9b0e0");
+    g.fillRect(x | 0, y, 1, 1);
+  }
+  // moon
+  // crescent moon drawn as pixels (no masking box over the sky gradient)
+  const MOON = ["0001111000", "0111100000", "0111000000", "1111000000", "1111000000",
+                "1111000000", "1111000000", "0111100000", "0111110000", "0001111000"];
+  g.fillStyle = "#f6e7ff";
+  for (let r = 0; r < MOON.length; r++) for (let c = 0; c < 10; c++)
+    if (MOON[r][c] === "1") g.fillRect(152 + c, 12 + r, 1, 1);
+}
+function drawSkyline(par, colBody, colWin, minH, maxH, seed, unit) {
+  const off = S.scroll * par, first = Math.floor(off / unit);
+  for (let i = first; i <= first + Math.ceil(W / unit) + 1; i++) {
+    const h = minH + ((hash(i, seed, 1) * (maxH - minH)) | 0);
+    const x = Math.round(i * unit - off);
+    g.fillStyle = colBody; g.fillRect(x, H - h, unit, h);
+    for (let wy = H - h + 3; wy < H - 2; wy += 4)
+      for (let wx = x + 2; wx < x + unit - 1; wx += 3)
+        if (hash(wx + i * 31, wy, seed) < 0.18) { g.fillStyle = colWin; g.fillRect(wx, wy, 1, 1); }
+  }
+}
+function drawBuilding(b) {
+  const x = Math.round(b.x - S.scroll), t = b.top;
+  if (x > W || x + b.w < 0) return;
+  g.fillStyle = "#120a22"; g.fillRect(x, t, b.w, H - t);
+  g.fillStyle = "#1c1233"; g.fillRect(x + b.w - 2, t, 2, H - t);           // side shade
+  g.fillStyle = b.col; g.fillRect(x, t, b.w, 1);                           // neon roof trim
+  // windows
+  const hasSign = b.sign && H - t > 26;
+  for (let wy = t + 4; wy < H - 2; wy += 4) {
+    if (hasSign && wy < t + 12) continue;              // keep the sign band clear
+    for (let wx = x + 2; wx < x + b.w - 3; wx += 3) {
+      const k = hash(b.id, wx - x, wy - t);
+      if (k < 0.42) {
+        const flick = hash(b.id * 7 + wx, wy, Math.floor(S.frame / 40)) < 0.04;
+        if (flick) continue;
+        g.fillStyle = k < 0.08 ? b.col : (k < 0.3 ? "#ffd27a" : "#6b5a8f");
+        g.fillRect(wx, wy, 2, 2);
+      }
+    }
+  }
+  // neon sign
+  if (hasSign) {
+    const on = hash(b.id, Math.floor(S.frame / 25), 9) > 0.08;
+    g.fillStyle = on ? b.sign : "#2a1840";
+    g.fillRect(x + 2, t + 6, Math.max(3, b.w - 6), 3);
+    g.fillStyle = "#05030c"; g.fillRect(x + 3, t + 7, Math.max(1, b.w - 8), 1);
+  }
+  // antennas with blinking red tips
+  for (const a of b.ants) {
+    const ax = x + a.dx;
+    g.fillStyle = "#8b84a8"; g.fillRect(ax, t - a.h, 1, a.h);
+    g.fillRect(ax - 1, t - 2, 3, 2);
+    const blink = ((S.frame + b.id * 13) % 50) < 25;
+    g.fillStyle = blink ? "#ff2a3a" : "#5a1020"; g.fillRect(ax, t - a.h - 1, 1, 1);
+    if (blink) { g.fillStyle = "rgba(255,42,58,0.35)"; g.fillRect(ax - 1, t - a.h - 2, 3, 3); }
+  }
+}
+// paper plane sprites (8x5): 1 white, 2 light shade, 3 crease
+const PLANE = {
+  up:    ["00000001", "00001111", "00111110", "11122200", "01330000"],
+  level: ["11100000", "01111110", "00111111", "01222200", "11330000"],
+  down:  ["11000000", "01111000", "00111100", "01222211", "00033110"]
+};
+const PCOL = { "1": "#ffffff", "2": "#c9d6ff", "3": "#7f8cc4" };
+function drawPlane() {
+  const spr = S.dead ? PLANE.down : (S.vy < -0.5 ? PLANE.up : (S.vy > 0.8 ? PLANE.down : PLANE.level));
+  const y = Math.round(S.y) - 2;
+  if (!S.dead && S.started) {                       // little speed trail
+    g.fillStyle = "rgba(41,240,255,0.5)"; g.fillRect(PX - 4, y + 2, 3, 1);
+    g.fillStyle = "rgba(255,63,210,0.4)"; g.fillRect(PX - 8, y + 2, 3, 1);
+  }
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 8; c++) {
+    const v = spr[r][c];
+    if (v !== "0") { g.fillStyle = PCOL[v]; g.fillRect(PX + c - 1, y + r, 1, 1); }
+  }
+}
+function draw(demo) {
+  g.imageSmoothingEnabled = false;
+  drawSky();
+  drawSkyline(0.15, "#160c2c", "#3b2a63", 18, 46, 11, 9);
+  drawSkyline(0.4, "#1b0f33", "#5e3f8a", 12, 34, 23, 12);
+  // haze
+  g.fillStyle = "rgba(255,63,210,0.06)"; g.fillRect(0, H - 30, W, 30);
+  for (const b of S.buildings) drawBuilding(b);
+  // street glow
+  g.fillStyle = "#29f0ff"; g.globalAlpha = 0.25; g.fillRect(0, H - 1, W, 1); g.globalAlpha = 1;
+  if (!S.dead || S.frame - S.deadAt < 3 || S.y < H - 3) drawPlane();
+  for (const p of S.parts) if (p.y < H) { g.fillStyle = p.c; g.fillRect(p.x | 0, p.y | 0, 1, 1); }
+  // HUD
+  g.fillStyle = "rgba(5,3,12,0.55)"; g.fillRect(0, 0, W, 8);
+  text("SCORE " + S.score, 2, 2, "#ffffff");
+  const bs = "BEST " + Math.max(best, S.score);
+  text(bs, W - textW(bs) - 2, 2, "#ffe14a");
+  if (demo) { const d = "DEMO"; text(d, ((W - textW(d)) / 2) | 0, 2, "#ff3fd2"); }
+  if (!S.started && !S.dead && !demo) {
+    textC("NEON GLIDE", 22, "#29f0ff", 2, "#ff3fd2");
+    textC("TAP OR SPACE TO CLIMB", 62, "#ffffff", 1, "#3a0f4a");
+  }
+  if (S.dead && S.frame - S.deadAt > 8) {
+    textC("CRASH", 30, "#ff3fd2", 2, "#05030c");
+    textC("SCORE " + S.score, 48, "#ffffff", 1, "#05030c");
+    if (!demo && S.frame - S.deadAt > 30) textC("TAP TO RESTART", 58, "#29f0ff", 1, "#05030c");
+  }
+}
+
+// ---- demo mode: #t=<seconds> draws exactly that moment (seeded, no clock) ----
+const DEMO_SEED = 20261119, RESTART_FRAMES = 75;
+function demoAt(t) {
+  runNo = 0; best = 0;
+  newRun(DEMO_SEED);
+  const n = Math.max(0, Math.round(t * 60));
+  for (let i = 0; i < n; i++) {
+    if (S.dead && S.frame - S.deadAt >= RESTART_FRAMES) { runNo++; newRun(DEMO_SEED + runNo * 977); }
+    autopilot();
+    step();
+  }
+  draw(true);
+}
+function hashT() {
+  const m = /(?:^#|&)t=([0-9.]+)/.exec(location.hash);
+  return m ? parseFloat(m[1]) : null;
+}
+
+// ---- live play ----
+let raf = 0, last = 0, acc = 0;
+function liveLoop(now) {
+  if (!last) last = now;
+  acc = Math.min(acc + (now - last) / 1000, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  draw(false);
+  raf = requestAnimationFrame(liveLoop);
+}
+function input(e) {
+  if (e) e.preventDefault();
+  if (hashT() !== null) return;
+  if (S.dead) { if (S.frame - S.deadAt > 30) { runNo++; newRun((Date.now() ^ (runNo * 2654435761)) >>> 0); } return; }
+  flap();
+}
+window.addEventListener("keydown", e => { if (e.code === "Space" || e.key === " " || e.key === "ArrowUp") input(e); });
+cv.addEventListener("pointerdown", input);
+document.body.addEventListener("pointerdown", e => { if (e.target !== cv) input(e); });
+
+function fit() {
+  const k = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  const k2 = Math.min(innerWidth / W, innerHeight / H);
+  const s = k2 >= 1 ? k : k2;
+  cv.style.width = (W * s) + "px"; cv.style.height = (H * s) + "px";
+}
+function start() {
+  cancelAnimationFrame(raf); last = 0; acc = 0;
+  const t = hashT();
+  if (t !== null) demoAt(t);
+  else { newRun((Date.now() >>> 0)); raf = requestAnimationFrame(liveLoop); }
+}
+window.addEventListener("resize", fit);
+window.addEventListener("hashchange", start);
+fit(); start();
+</script>
+</body>
+</html>

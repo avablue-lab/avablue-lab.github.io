@@ -15,7 +15,18 @@ footer{color:var(--muted);font-size:14px;margin-top:32px}
 </style></head><body><main>
 <h1>Ava Blue · things I asked Claude to build</h1>
 <p class="intro">Every page here was written by Claude in one go from a single ask. I don&#x27;t fix its files; when something broke, the fixed copy is labelled. The prompt is under each one.</p>
-<article>
+<article id="look-before-ship">
+  <a class="shot" href="look-before-ship/look-1/index.html"><img src="look-before-ship/preview.jpg" alt="Six Claudes, one game: three looked at their frames first" loading="lazy" width="960" height="600"></a>
+  <h2>Six Claudes, one game: three looked at their frames first</h2>
+  <p class="meta">2026-11-20 · Claude Opus 5.5 (six fresh sessions)</p>
+  <p>A pixel-art paper plane over a neon city. Three sessions wrote it blind; three could render the game and look at the frames before finishing (one extra paragraph in the ask). Same bug count, but only the ones that looked made demos that crash and restart.</p>
+  <p class="links"><a href="look-before-ship/look-1/index.html">Looked 1</a> · <a href="look-before-ship/look-2/index.html">Looked 2</a> · <a href="look-before-ship/look-3/index.html">Looked 3</a> · <a href="look-before-ship/blind-1/index.html">Blind 1</a> · <a href="look-before-ship/blind-2/index.html">Blind 2</a> · <a href="look-before-ship/blind-3/index.html">Blind 3</a></p>
+  <details><summary>The prompt</summary><blockquote>Make me a tiny pixel-art game in a single index.html, no libraries and no external files: a paper plane flies through a neon city at night, you tap or press space to climb, and you dodge the rooftops and antennas. Show a score, and restart after a crash. Also add a demo mode: when the URL has #t=&lt;seconds&gt;, a simple autopilot plays and the page draws exactly that moment of the demo (seeded random, no clock), so I can record it frame by frame.
+
+Before you finish, look at your game: render frames of the demo with `python3 -I tools/screenshot.py &lt;your index.html&gt; &lt;out.png&gt; --hash t=&lt;seconds&gt;` at a few different moments, open the PNGs and look at them, and fix anything that looks wrong.</blockquote></details>
+  
+</article>
+<article id="keyboard-switch">
   <a class="shot" href="keyboard-switch/index.html"><img src="keyboard-switch/preview.jpg" alt="Cherry MX Red teardown" loading="lazy" width="960" height="600"></a>
   <h2>Cherry MX Red teardown</h2>
   <p class="meta">2026-11-17 · Claude Opus 5.5</p>
@@ -24,7 +35,7 @@ footer{color:var(--muted);font-size:14px;margin-top:32px}
   <details><summary>The prompt</summary><blockquote>Build me an interactive teardown of a Cherry MX Red mechanical keyboard switch as a single index.html with no libraries or external files (canvas 2D or SVG). It should open up step by step: one button per part (housing top, stem, spring, contact leaves, housing bottom) that pulls that part out and labels it, plus a &quot;press&quot; view that pushes the key down and shows exactly where it fires. Use the real Cherry MX Red numbers, and put them in a panel that updates live from the same formulas that move the parts (key travel in mm, spring force, and whether the contacts are open or closed). Add an auto tour that walks through all of it in about 10 seconds. Read #t=&lt;seconds&gt; from the URL and draw that moment of the auto tour, deterministic (no wall clock, no randomness), so I can record it frame by frame.</blockquote></details>
   <p class="post"><a href="https://x.com/xavablueava/status/2122826323701727726">The post on X →</a></p>
 </article>
-<article>
+<article id="dither-three-claudes">
   <a class="shot" href="dither-three-claudes/haiku/index.html"><img src="dither-three-claudes/preview.jpg" alt="Same prompt, three Claudes: photo → 1-bit print" loading="lazy" width="960" height="600"></a>
   <h2>Same prompt, three Claudes: photo → 1-bit print</h2>
   <p class="meta">2026-11-15 · Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5</p>
@@ -33,7 +44,7 @@ footer{color:var(--muted);font-size:14px;margin-top:32px}
   <details><summary>The prompt</summary><blockquote>make me a single index.html with no libraries or external files that turns any photo i upload into a 1-bit dithered print, with a choice of dither styles, a contrast slider, and a button to download the result as a png.</blockquote></details>
   <p class="post"><a href="https://x.com/xavablueava/status/2122088041884078517">The post on X →</a></p>
 </article>
-<article>
+<article id="neon-canyon">
   <a class="shot" href="neon-canyon/index.html"><img src="neon-canyon/preview.jpg" alt="One-sentence 3D racer" loading="lazy" width="960" height="600"></a>
   <h2>One-sentence 3D racer</h2>
   <p class="meta">2026-11-14 · Claude Opus 5.5</p>

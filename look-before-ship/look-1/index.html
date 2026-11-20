@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Neon Glide</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07040f; overflow: hidden; touch-action: manipulation; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+"use strict";
+// ---- constants ---------------------------------------------------------
+const W = 192, H = 108;          // low-res pixel canvas
+const STEP = 1 / 60;             // fixed simulation step (seconds)
+const GROUND = 100;              // street level
+const CEIL = 6;                  // storm clouds: touching them is a crash
+const PX = 40;                   // plane x (fixed, the city scrolls)
+const GRAV = 0.05, FLAP = -1.2, MAXFALL = 2.0, SPEED = 0.85;
+const RISE = FLAP * FLAP / (2 * GRAV);   // height one tap climbs (~14 px)
+const PW = 7, PH = 3;            // plane hitbox
+
+// ---- seeded random (mulberry32) ---------------------------------------
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hash2(x, y) {           // stable per-pixel noise for windows and stars
+  let h = (x * 374761393 + y * 668265263) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+const NEON = ["#ff2bd6", "#21f0ff", "#ffe14d", "#8a5bff", "#3dff8f"];
+
+// ---- world ------------------------------------------------------------
+function newGame(seed) {
+  const g = {
+    rand: rng(seed), seed, y: 50, vy: 0, scroll: 0, frame: 0,
+    buildings: [], nextX: W + 10, lastTop: 70, score: 0,
+    dead: false, deadFrames: 0, started: false, trail: [], sparks: [],
+  };
+  g.lapseAt = 14 + Math.floor(rng(seed ^ 0x5eed)() * 10);   // demo only: score where the autopilot slips
+  // a few starter rooftops already on screen, low and gentle
+  let x = -10;
+  while (x < W + 10) { x = addBuilding(g, x, true); }
+  return g;
+}
+
+function addBuilding(g, x, easy) {
+  const r = g.rand;
+  const w = 16 + Math.floor(r() * 18);
+  let top;
+  if (easy) top = 82 + Math.floor(r() * 10);
+  else {
+    // never more than 22 px higher than the previous roof, so it's always climbable
+    const lo = Math.max(34, g.lastTop - 22), hi = 90;
+    top = lo + Math.floor(r() * (hi - lo + 1));
+  }
+  let ant = 0;
+  if (!easy && r() < 0.45) {
+    ant = 8 + Math.floor(r() * 14);
+    if (top - ant < CEIL + 24) ant = Math.max(0, top - (CEIL + 24));   // keep a flyable gap above it
+    if (ant < 5) ant = 0;
+  }
+  const b = {
+    x, w, top, ant, antX: 3 + Math.floor(r() * (w - 6)),
+    color: NEON[Math.floor(r() * NEON.length)],
+    sign: r() < 0.35, win: Math.floor(r() * 1e6), passed: x + w < PX,
+  };
+  g.buildings.push(b);
+  g.lastTop = Math.min(top, top - ant + 6);
+  const gap = 6 + Math.floor(r() * 16);
+  return x + w + gap;
+}
+
+function flap(g) {
+  if (g.dead) return;
+  g.started = true;
+  g.vy = FLAP;
+}
+
+function hit(g) {
+  const px0 = PX - 3, py0 = g.y - 1;
+  if (g.y - 1 <= CEIL || g.y + 1 >= GROUND) return true;
+  for (const b of g.buildings) {
+    const bx = b.x - g.scroll;
+    if (bx > PX + 6 || bx + b.w < PX - 6) continue;
+    if (px0 + PW > bx && px0 < bx + b.w && py0 + PH > b.top) return true;
+    if (b.ant) {
+      const ax = bx + b.antX;
+      if (px0 + PW > ax && px0 < ax + 1 && py0 + PH > b.top - b.ant) return true;
+    }
+  }
+  return false;
+}
+
+function step(g) {
+  g.frame++;
+  if (g.dead) {
+    g.deadFrames++;
+    for (const s of g.sparks) { s.x += s.vx; s.y += s.vy; s.vy += 0.05; s.life--; }
+    return;
+  }
+  if (!g.started) {                       // idle bob before the first tap
+    g.y = 50 + Math.round(Math.sin(g.frame / 20) * 2);
+    return;
+  }
+  g.vy = Math.min(MAXFALL, g.vy + GRAV);
+  g.y += g.vy;
+  g.scroll += SPEED;
+  g.trail.push(g.y);
+  if (g.trail.length > 24) g.trail.shift();
+  // spawn / recycle buildings
+  while (g.nextX - g.scroll < W + 40) g.nextX = addBuilding(g, g.nextX, false);
+  g.buildings = g.buildings.filter(b => b.x + b.w - g.scroll > -20);
+  for (const b of g.buildings) {
+    if (!b.passed && b.x + b.w - g.scroll < PX - 3) { b.passed = true; g.score++; }
+  }
+  if (hit(g)) {
+    g.dead = true;
+    const r = rng(g.seed * 31 + g.frame);
+    for (let i = 0; i < 18; i++) {
+      const a = r() * Math.PI * 2, s = 0.3 + r() * 1.2;
+      g.sparks.push({ x: PX, y: g.y, vx: Math.cos(a) * s - 0.3, vy: Math.sin(a) * s - 0.6,
+                      life: 30 + Math.floor(r() * 30), c: NEON[i % NEON.length] });
+    }
+  }
+}
+
+// ---- autopilot (demo) -------------------------------------------------
+function autopilot(g) {
+  if (g.dead) return;
+  if (!g.started) { if (g.frame >= 40) flap(g); return; }
+  // the demo pilot "gets distracted" after a while so the recording shows a crash + restart
+  if (g.score >= g.lapseAt) return;
+  // the highest obstacle in the next stretch of city decides the target height
+  let minTop = GROUND;
+  const ahead0 = PX - 6, ahead1 = PX + 46;
+  for (const b of g.buildings) {
+    const bx = b.x - g.scroll;
+    if (bx > ahead1 || bx + b.w < ahead0) continue;
+    minTop = Math.min(minTop, b.top);
+    if (b.ant) {
+      const ax = bx + b.antX;
+      if (ax >= ahead0 - 2 && ax <= ahead1) minTop = Math.min(minTop, b.top - b.ant);
+    }
+  }
+  const target = Math.max(CEIL + RISE + 3, minTop - 9);
+  const predicted = g.y + g.vy * 10 + GRAV * 50;
+  // never tap so high that the climb would reach the storm clouds
+  if (predicted > target && g.vy > -0.4 && g.y - RISE > CEIL + 3) flap(g);
+}
+
+// ---- tiny 3x5 pixel font ------------------------------------------------
+const FONT = {
+  "0":"011101101101110", "1":"010110010010111", "2":"111001111100111",
+  "3":"111001111001111", "4":"101101111001001", "5":"111100111001111", "6":"111100111101111",
+  "7":"111001010010010", "8":"111101111101111", "9":"111101111001111",
+  "A":"010101111101101", "B":"110101110101110", "C":"011100100100011", "D":"110101101101110",
+  "E":"111100110100111", "G":"011100101101011", "H":"101101111101101", "I":"111010010010111",
+  "L":"100100100100111", "M":"101111101101101", "N":"110101101101101", "O":"010101101101010",
+  "P":"110101110100100", "R":"110101110101101", "S":"011100010001110", "T":"111010010010010",
+  "U":"101101101101111", "V":"101101101101010", "W":"101101111111101", "Y":"101101010010010",
+  "K":"101101110101101", "F":"111100110100100", ":":"000010000010000", " ":"000000000000000",
+  "/":"001001010100100", "-":"000000111000000", "!":"010010010000010", ".":"000000000000010",
+};
+function text(ctx, s, x, y, color, shadow) {
+  s = String(s).toUpperCase();
+  for (let pass = shadow ? 0 : 1; pass < 2; pass++) {
+    ctx.fillStyle = pass === 0 ? shadow : color;
+    const o = pass === 0 ? 1 : 0;
+    for (let i = 0; i < s.length; i++) {
+      const glyph = FONT[s[i]] || FONT[" "];
+      for (let p = 0; p < 15; p++) if (glyph[p] === "1") ctx.fillRect(x + i * 4 + (p % 3) + o, y + Math.floor(p / 3) + o, 1, 1);
+    }
+  }
+}
+const textW = s => String(s).length * 4 - 1;
+
+// ---- drawing ------------------------------------------------------------
+const view = document.getElementById("screen");
+const out = view.getContext("2d");
+const buf = document.createElement("canvas");
+buf.width = W; buf.height = H;
+const ctx = buf.getContext("2d");
+
+function drawSky(g) {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#0b0620"); grad.addColorStop(0.55, "#2a0c45"); grad.addColorStop(1, "#5a1650");
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  // stars (slow parallax, twinkle by frame)
+  const sx = Math.floor(g.scroll * 0.05);
+  for (let i = 0; i < 70; i++) {
+    const x = Math.floor(hash2(i, 1) * (W + 40)), y = 8 + Math.floor(hash2(i, 2) * 50);
+    const px = ((x - sx) % (W + 40) + (W + 40)) % (W + 40) - 20;
+    const tw = ((g.frame >> 3) + i) % 11 === 0;
+    ctx.fillStyle = tw ? "#ffffff" : (hash2(i, 3) < 0.5 ? "#7d6aa8" : "#c9b8ff");
+    ctx.fillRect(px, y, 1, 1);
+  }
+  // moon
+  ctx.fillStyle = "#f6e9ff"; circle(150, 22, 7);
+  ctx.fillStyle = "#0b0620"; circle(153, 20, 6);
+  // storm-cloud ceiling
+  for (let x = 0; x < W; x++) {
+    const n = Math.floor(hash2(Math.floor((x + g.scroll * 0.6) / 3), 9) * 3);
+    ctx.fillStyle = "#1a1030"; ctx.fillRect(x, 0, 1, CEIL + n);
+    ctx.fillStyle = "#3a2560"; ctx.fillRect(x, CEIL + n, 1, 1);
+  }
+}
+
+function circle(cx, cy, r) {
+  for (let y = -r; y <= r; y++) {
+    const w = Math.floor(Math.sqrt(r * r - y * y));
+    ctx.fillRect(cx - w, cy + y, w * 2 + 1, 1);
+  }
+}
+
+function drawFarCity(g, factor, color, winColor, minH, maxH, seedRow) {
+  const off = g.scroll * factor;
+  const base = Math.floor(off / 12);
+  for (let i = base - 1; i < base + W / 12 + 3; i++) {
+    const x = Math.round(i * 12 - off);
+    const h = minH + Math.floor(hash2(i, seedRow) * (maxH - minH));
+    const w = 9 + Math.floor(hash2(i, seedRow + 1) * 6);
+    ctx.fillStyle = color; ctx.fillRect(x, GROUND - h, w, h);
+    if (winColor) {
+      for (let wy = GROUND - h + 3; wy < GROUND - 2; wy += 3)
+        for (let wx = x + 2; wx < x + w - 1; wx += 2)
+          if (hash2(wx + Math.floor(off) * 0 + i * 7, wy) < 0.18) { ctx.fillStyle = winColor; ctx.fillRect(wx, wy, 1, 1); }
+    }
+  }
+}
+
+function drawBuilding(g, b) {
+  const x = Math.round(b.x - g.scroll), top = b.top, w = b.w;
+  if (x > W || x + w < 0) return;
+  // body
+  ctx.fillStyle = "#120a22"; ctx.fillRect(x, top, w, GROUND - top);
+  ctx.fillStyle = "#1d1236"; ctx.fillRect(x + 1, top + 1, w - 2, GROUND - top - 1);
+  // windows
+  for (let wy = top + 4; wy < GROUND - 3; wy += 4) {
+    for (let wx = x + 3; wx < x + w - 3; wx += 3) {
+      const n = hash2(b.win + wx - x, wy);
+      if (n < 0.45) {
+        ctx.fillStyle = n < 0.08 ? b.color : (n < 0.3 ? "#ffd27a" : "#5a4a7a");
+        ctx.fillRect(wx, wy, 2, 2);
+      }
+    }
+  }
+  // neon roof edge
+  ctx.fillStyle = b.color; ctx.fillRect(x, top, w, 1);
+  ctx.fillRect(x, top, 1, 3); ctx.fillRect(x + w - 1, top, 1, 3);
+  // vertical neon sign
+  if (b.sign && w > 20) {
+    const on = ((g.frame + b.win) >> 4) % 6 !== 0;
+    ctx.fillStyle = on ? b.color : "#3a2a50";
+    const sx = x + w - 5, sy = top + 6, sh = Math.min(16, GROUND - top - 10);
+    if (sh > 4) { const c = ctx.fillStyle; ctx.fillStyle = "#07040f"; ctx.fillRect(sx - 1, sy - 1, 5, sh + 2); ctx.fillStyle = c; ctx.fillRect(sx, sy, 3, sh); ctx.fillStyle = "#120a22"; for (let k = sy + 2; k < sy + sh - 1; k += 3) ctx.fillRect(sx + 1, k, 1, 1); }
+  }
+  // antenna
+  if (b.ant) {
+    const ax = x + b.antX;
+    ctx.fillStyle = "#8a86a0"; ctx.fillRect(ax, top - b.ant, 1, b.ant);
+    ctx.fillRect(ax - 1, top - Math.floor(b.ant * 0.5), 3, 1);
+    const blink = ((g.frame + b.win) >> 5) % 2 === 0;
+    ctx.fillStyle = blink ? "#ff3045" : "#5a1a22"; ctx.fillRect(ax, top - b.ant - 1, 1, 1);
+    if (blink) { ctx.fillStyle = "rgba(255,48,69,0.35)"; ctx.fillRect(ax - 1, top - b.ant - 2, 3, 3); }
+  }
+}
+
+const PLANE = [   // W = white, G = shade, 9x5, nose to the right
+  "WW.......",
+  ".WWWW....",
+  "..WWWWWWW",
+  "..GGGG...",
+  "...G.....",
+];
+const PLANE_UP = [
+  "........W",
+  "....WWWW.",
+  ".WWWWWW..",
+  "WWGGG....",
+  ".GG......",
+];
+const PLANE_DOWN = [
+  "W........",
+  ".WWWW....",
+  "..WWWWW..",
+  "...GGGWW.",
+  "....G...W",
+];
+function drawPlane(g) {
+  const sprite = !g.started || g.dead ? PLANE : g.vy < -0.5 ? PLANE_UP : g.vy > 1.0 ? PLANE_DOWN : PLANE;
+  const ox = PX - 4, oy = Math.round(g.y) - 2;
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 9; c++) {
+    const ch = sprite[r][c];
+    if (ch === ".") continue;
+    ctx.fillStyle = ch === "W" ? "#f4f7ff" : "#9fb4d8";
+    ctx.fillRect(ox + c, oy + r, 1, 1);
+  }
+}
+
+function drawTrail(g) {
+  const n = g.trail.length;
+  for (let i = 0; i < n; i += 2) {
+    const x = Math.round(PX - 5 - (n - 1 - i) * SPEED);
+    ctx.fillStyle = i > n - 8 ? "#21f0ff" : "#1a6a8a";
+    ctx.fillRect(x, Math.round(g.trail[i]), 1, 1);
+  }
+}
+
+function render(g, demo) {
+  ctx.imageSmoothingEnabled = false;
+  drawSky(g);
+  drawFarCity(g, 0.15, "#1c0f33", "#4a3070", 18, 48, 20);
+  drawFarCity(g, 0.35, "#160b29", "#7a4a8a", 10, 36, 40);
+  for (const b of g.buildings) drawBuilding(g, b);
+  // street
+  ctx.fillStyle = "#0a0614"; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = "#ff2bd6"; ctx.fillRect(0, GROUND, W, 1);
+  for (let x = -((Math.floor(g.scroll * 1.5)) % 12); x < W; x += 12) { ctx.fillStyle = "#4a2a5a"; ctx.fillRect(x, GROUND + 4, 6, 1); }
+  if (!g.dead) { if (g.started) drawTrail(g); drawPlane(g); }
+  for (const s of g.sparks) if (s.life > 0) { ctx.fillStyle = s.c; ctx.fillRect(Math.round(s.x), Math.round(s.y), 1, 1); }
+
+  // HUD
+  const sc = String(g.score);
+  text(ctx, sc, Math.floor((W - textW(sc)) / 2), 10, "#ffffff", "#ff2bd6");
+  text(ctx, "BEST " + best, 4, H - 6, "#c9b8ff", null);
+  if (demo) text(ctx, "DEMO", W - 4 - textW("DEMO"), H - 6, "#21f0ff", null);
+  if (!g.started && !g.dead) {
+    centerBox(36, 30);
+    text(ctx, "NEON GLIDE", Math.floor((W - textW("NEON GLIDE")) / 2), 40, "#21f0ff", "#8a1a7a");
+    const m = "TAP OR SPACE TO CLIMB";
+    if ((g.frame >> 5) % 2 === 0) text(ctx, m, Math.floor((W - textW(m)) / 2), 54, "#ffffff", null);
+  }
+  if (g.dead && g.deadFrames > 36) {           // let the sparks show before the card covers them
+    centerBox(34, 40);
+    text(ctx, "CRASH!", Math.floor((W - textW("CRASH!")) / 2), 40, "#ff3045", "#3a0010");
+    const s2 = "SCORE " + g.score;
+    text(ctx, s2, Math.floor((W - textW(s2)) / 2), 50, "#ffffff", null);
+    const m = demo ? "RESTARTING..." : "TAP TO RESTART";
+    if (g.deadFrames > 48 && (g.deadFrames >> 4) % 2 === 1) text(ctx, m, Math.floor((W - textW(m)) / 2), 60, "#ffe14d", null);
+  }
+
+  out.imageSmoothingEnabled = false;
+  out.drawImage(buf, 0, 0, view.width, view.height);
+}
+
+function centerBox(y, h) {
+  ctx.fillStyle = "rgba(7,4,15,0.78)"; ctx.fillRect(44, y - 2, W - 88, h);
+  ctx.fillStyle = "#8a5bff"; ctx.fillRect(44, y - 2, W - 88, 1); ctx.fillRect(44, y + h - 3, W - 88, 1);
+}
+
+function fit() {
+  const s = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  view.width = W * s; view.height = H * s;
+}
+
+// ---- modes ----------------------------------------------------------------
+let best = 0;
+let game = null;
+
+function demoTime() {
+  const m = location.hash.match(/(?:^#|&)t=([0-9.]+)/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+// Demo: replay the autopilot from t=0 in fixed steps, so #t=<s> always draws the same frame.
+function renderDemo(t) {
+  best = 0;
+  let round = 0;
+  let g = newGame(1337);
+  const steps = Math.round(t / STEP);
+  const crashes = [];
+  for (let i = 0; i < steps; i++) {
+    autopilot(g);
+    step(g);
+    if (g.dead && g.deadFrames === 1) crashes.push(((i + 1) * STEP).toFixed(1));
+    if (g.dead && g.deadFrames >= 100) { best = Math.max(best, g.score); round++; g = newGame(1337 + round); }
+  }
+  render(g, true);
+  if (/(^#|&)log=1/.test(location.hash)) {          // debug: list crash times for picking frames
+    crashes.slice(0, 12).forEach((c, k) => text(ctx, c, 4, 10 + k * 7, "#ffe14d", "#000000"));
+    out.drawImage(buf, 0, 0, view.width, view.height);
+  }
+}
+
+function startPlay() {
+  game = newGame((Date.now() & 0xffff) + 1);
+  let acc = 0, last = performance.now();
+  function loop(now) {
+    if (demoTime() !== null) return;
+    acc += Math.min(0.1, (now - last) / 1000); last = now;
+    while (acc >= STEP) { step(game); acc -= STEP; }
+    render(game, false);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+function press() {
+  if (demoTime() !== null) return;
+  if (game.dead) {
+    if (game.deadFrames > 30) { best = Math.max(best, game.score); game = newGame((Date.now() & 0xffff) + 1); }
+    return;
+  }
+  flap(game);
+}
+
+addEventListener("keydown", e => { if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); } });
+addEventListener("pointerdown", e => { e.preventDefault(); press(); });
+addEventListener("resize", () => { fit(); boot(); });
+addEventListener("hashchange", boot);
+
+function boot() {
+  fit();
+  const t = demoTime();
+  if (t !== null) renderDemo(t);
+  else if (!game) startPlay();
+}
+boot();
+</script>
+</body>
+</html>

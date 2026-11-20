@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Neon Plane</title>
+<style>
+html,body{margin:0;height:100%;background:#05030d;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+body{display:flex;align-items:center;justify-content:center}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
+</style>
+</head>
+<body>
+<canvas id="c" width="256" height="144"></canvas>
+<script>
+"use strict";
+(function () {
+  // ---------- constants ----------
+  var W = 256, H = 144, CEIL = 8, PX = 56, STEP = 1 / 60;
+  var GRAV = 0.1, FLAP = -1.8, MAXFALL = 3;
+  var DEMO_SEED = 20261119;
+  var NEON = ["#ff2bd6", "#20e3ff", "#a855ff", "#7dff5a", "#ffb020"];
+  var SKY = ["#090418", "#0d0622", "#12082c", "#180a36", "#1f0c40", "#280f4a", "#341253", "#43165c"];
+
+  var cv = document.getElementById("c");
+  var ctx = cv.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+
+  function fit() {
+    var s = Math.min(innerWidth / W, innerHeight / H);
+    if (s >= 2) s = Math.floor(s);
+    cv.style.width = Math.round(W * s) + "px";
+    cv.style.height = Math.round(H * s) + "px";
+  }
+
+  // ---------- seeded random + hash (no clock anywhere in the sim) ----------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function hash(a, b) {
+    var h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h ^= h >>> 16;
+    return h >>> 0;
+  }
+
+  // ---------- pixel font (3x5) ----------
+  var FONT = {
+    A: ".#. #.# ### #.# #.#", B: "##. #.# ##. #.# ##.", C: ".## #.. #.. #.. .##",
+    D: "##. #.# #.# #.# ##.", E: "### #.. ##. #.. ###", F: "### #.. ##. #.. #..",
+    G: ".## #.. #.# #.# .##", H: "#.# #.# ### #.# #.#", I: "### .#. .#. .#. ###",
+    J: "..# ..# ..# #.# .#.", K: "#.# #.# ##. #.# #.#", L: "#.. #.. #.. #.. ###",
+    M: "#.# ### ### #.# #.#", N: "##. #.# #.# #.# #.#", O: ".#. #.# #.# #.# .#.",
+    P: "##. #.# ##. #.. #..", Q: ".#. #.# #.# ##. .##", R: "##. #.# ##. #.# #.#",
+    S: ".## #.. .#. ..# ##.", T: "### .#. .#. .#. .#.", U: "#.# #.# #.# #.# ###",
+    V: "#.# #.# #.# #.# .#.", W: "#.# #.# ### ### #.#", X: "#.# #.# .#. #.# #.#",
+    Y: "#.# #.# .#. .#. .#.", Z: "### ..# .#. #.. ###",
+    "0": "### #.# #.# #.# ###", "1": ".#. ##. .#. .#. ###", "2": "##. ..# .#. #.. ###",
+    "3": "##. ..# .#. ..# ##.", "4": "#.# #.# ### ..# ..#", "5": "### #.. ##. ..# ##.",
+    "6": ".## #.. ### #.# ###", "7": "### ..# .#. .#. .#.", "8": "### #.# ### #.# ###",
+    "9": "### #.# ### ..# ##.", ":": "... .#. ... .#. ...", ".": "... ... ... ... .#.",
+    "/": "..# ..# .#. #.. #..", "-": "... ... ### ... ..."
+  };
+  for (var k in FONT) FONT[k] = FONT[k].split(" ");
+
+  function textW(s, sc) { return (s.length * 4 - 1) * sc; }
+  function drawTextRaw(s, x, y, col, sc) {
+    ctx.fillStyle = col;
+    s = s.toUpperCase();
+    for (var i = 0; i < s.length; i++) {
+      var g = FONT[s[i]];
+      if (!g) continue;
+      for (var r = 0; r < 5; r++)
+        for (var c = 0; c < 3; c++)
+          if (g[r][c] === "#") ctx.fillRect(x + (i * 4 + c) * sc, y + r * sc, sc, sc);
+    }
+  }
+  function drawText(s, x, y, col, sc) {
+    drawTextRaw(s, x + sc, y + sc, "#05020c", sc);
+    drawTextRaw(s, x, y, col, sc);
+  }
+  function drawCentered(s, y, col, sc) {
+    drawText(s, Math.floor((W - textW(s, sc)) / 2), y, col, sc);
+  }
+
+  // ---------- game state ----------
+  function newGame(seed, demo) {
+    var g = {
+      rng: mulberry32(seed), fx: mulberry32(seed ^ 0x9e3779b9), demo: demo,
+      step: 0, phase: demo ? "play" : "ready", py: 64, vy: 0, score: 0, best: 0,
+      dist: 0, blds: [], nextX: -4, made: 0, deadT: 0, parts: [], trail: [], flash: 0
+    };
+    fillCity(g);
+    return g;
+  }
+
+  function fillCity(g) {
+    while (g.nextX < W + 60) addBuilding(g);
+  }
+
+  function addBuilding(g) {
+    var r = g.rng;
+    var early = g.made < 6;
+    var d = Math.min(1, g.made / 40);
+    var w = 18 + Math.floor(r() * 22);
+    var gap = early ? 2 + Math.floor(r() * 4) : 4 + Math.floor(r() * 16);
+    var top;
+    if (early) top = H - 24 - Math.floor(r() * 16);
+    else if (r() < 0.18 + 0.2 * d) top = 40 + Math.floor(r() * 30);
+    else top = H - 90 + Math.floor(r() * 66);
+    var ant = null;
+    if (!early && r() < 0.45) {
+      var ah = 8 + Math.floor(r() * 22);
+      var ax = 2 + Math.floor(r() * (w - 5));
+      var tip = Math.max(CEIL + 28, top - ah);
+      if (top - tip >= 4) ant = { x: ax, h: top - tip };
+    }
+    var col = Math.floor(r() * 5);
+    var sign = null;
+    if (r() < 0.35) sign = { x: 1 + Math.floor(r() * (w - 10)), y: 6 + Math.floor(r() * 12), c: Math.floor(r() * 5) };
+    var b = { x: g.nextX + gap, w: w, top: top, ant: ant, col: col, sign: sign, id: g.made, passed: false };
+    g.nextX = b.x + w;
+    g.made++;
+    g.blds.push(b);
+  }
+
+  function restart(g) {
+    g.blds = []; g.nextX = -4; g.made = 0;
+    fillCity(g);
+    g.py = 64; g.vy = 0; g.score = 0; g.trail = []; g.deadT = 0;
+    g.phase = g.demo ? "play" : "ready";
+  }
+
+  function speed(g) { return 1.2 + Math.min(0.6, g.score * 0.015); }
+
+  function hit(g) {
+    var x0 = PX - 3, x1 = PX + 4, y0 = g.py - 1, y1 = g.py + 2;
+    if (y1 >= H - 1) return true;
+    for (var i = 0; i < g.blds.length; i++) {
+      var b = g.blds[i];
+      if (b.x > x1 || b.x + b.w < x0) {
+        // antenna can't stick out sideways, so skip
+        continue;
+      }
+      if (y1 > b.top) return true;
+      if (b.ant) {
+        var ax = b.x + b.ant.x;
+        if (ax + 1 >= x0 && ax <= x1 && y1 > b.top - b.ant.h && y0 < b.top) return true;
+      }
+    }
+    return false;
+  }
+
+  function crash(g) {
+    g.phase = "dead";
+    g.deadT = 0;
+    g.flash = 6;
+    if (g.score > g.best) {
+      g.best = g.score;
+      if (!g.demo) { try { localStorage.setItem("neonPlaneBest", String(g.best)); } catch (e) {} }
+    }
+    for (var i = 0; i < 18; i++) {
+      g.parts.push({
+        x: PX, y: g.py,
+        vx: (g.fx() - 0.5) * 3 - 0.4, vy: -g.fx() * 2.4,
+        life: 30 + Math.floor(g.fx() * 30), c: i % 3 === 0 ? "#f4f8ff" : NEON[Math.floor(g.fx() * 5)]
+      });
+    }
+  }
+
+  function updParts(g) {
+    for (var i = g.parts.length - 1; i >= 0; i--) {
+      var p = g.parts[i];
+      p.x += p.vx; p.vy += 0.08; p.y += p.vy; p.life--;
+      if (p.life <= 0 || p.y > H) g.parts.splice(i, 1);
+    }
+  }
+
+  // simple autopilot: find the highest obstacle just ahead and hover above it
+  function autopilot(g) {
+    var s = speed(g), a = PX - 8, z = PX + 70 + s * 50;
+    var req = H - 10;
+    for (var i = 0; i < g.blds.length; i++) {
+      var b = g.blds[i];
+      if (b.x > z || b.x + b.w < a) continue;
+      var t = b.top;
+      if (b.ant) {
+        var ax = b.x + b.ant.x;
+        if (ax >= a && ax <= z) t = Math.min(t, b.top - b.ant.h);
+      }
+      if (t < req) req = t;
+    }
+    var target = Math.max(CEIL + 12, req - 12);
+    return g.py > target && g.vy > -0.4;
+  }
+
+  function update(g, flap) {
+    g.step++;
+    if (g.flash > 0) g.flash--;
+    updParts(g);
+    if (g.phase === "ready") {
+      g.py = 64 + Math.round(Math.sin(g.step / 12) * 3);
+      if (flap) { g.phase = "play"; g.vy = FLAP; }
+      return;
+    }
+    if (g.phase === "dead") {
+      g.deadT++;
+      if ((!g.demo && flap && g.deadT > 30) || g.deadT > (g.demo ? 90 : 180)) restart(g);
+      return;
+    }
+    if (g.demo) flap = autopilot(g);
+    if (flap) g.vy = FLAP;
+    g.vy = Math.min(MAXFALL, g.vy + GRAV);
+    g.py += g.vy;
+    if (g.py < CEIL + 2) { g.py = CEIL + 2; if (g.vy < 0) g.vy = 0; }
+    var s = speed(g);
+    for (var i = 0; i < g.blds.length; i++) g.blds[i].x -= s;
+    g.nextX -= s;
+    g.dist += s;
+    while (g.blds.length && g.blds[0].x + g.blds[0].w < -8) g.blds.shift();
+    fillCity(g);
+    g.trail.unshift(g.py);
+    if (g.trail.length > 14) g.trail.pop();
+    for (var j = 0; j < g.blds.length; j++) {
+      var b = g.blds[j];
+      if (!b.passed && b.x + b.w < PX - 4) { b.passed = true; g.score++; }
+    }
+    if (hit(g)) crash(g);
+  }
+
+  // ---------- drawing ----------
+  function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+
+  function drawSky(g) {
+    var bh = H / SKY.length;
+    for (var i = 0; i < SKY.length; i++) rect(0, Math.floor(i * bh), W, Math.ceil(bh) + 1, SKY[i]);
+    // dithered band edges
+    for (var j = 1; j < SKY.length; j++) {
+      var y = Math.floor(j * bh);
+      ctx.fillStyle = SKY[j];
+      for (var x = 0; x < W; x += 2) ctx.fillRect(x + ((y >> 0) & 1), y - 1, 1, 1);
+      ctx.fillStyle = SKY[j - 1];
+      for (var x2 = 1; x2 < W; x2 += 2) ctx.fillRect(x2 - ((y >> 0) & 1), y, 1, 1);
+    }
+    // stars
+    var so = Math.floor(g.dist * 0.05);
+    for (var s = 0; s < 60; s++) {
+      if ((hash(s, 4) + (g.step >> 4)) % 7 === 0) continue;
+      var sx = ((hash(s, 1) % W) - so % W + W) % W;
+      var sy = CEIL + 2 + hash(s, 2) % 76;
+      rect(sx, sy, 1, 1, hash(s, 3) % 3 === 0 ? "#9fb4ff" : "#ffffff");
+    }
+    // moon
+    var mx = 204, my = 26, mr = 9;
+    for (var dy = -mr - 2; dy <= mr + 2; dy++)
+      for (var dx = -mr - 2; dx <= mr + 2; dx++) {
+        var dd = dx * dx + dy * dy;
+        if (dd <= mr * mr) rect(mx + dx, my + dy, 1, 1, "#f4ecd0");
+        else if (dd <= (mr + 2) * (mr + 2) && ((dx + dy) & 1) === 0) rect(mx + dx, my + dy, 1, 1, "#4a2a6e");
+      }
+    rect(mx - 4, my - 3, 3, 2, "#d9cfae");
+    rect(mx + 2, my + 2, 2, 2, "#d9cfae");
+    rect(mx - 1, my + 4, 2, 1, "#d9cfae");
+  }
+
+  function drawSkyline(g, par, bw, base, range, body, win, seedK, neonRoof) {
+    var off = g.dist * par;
+    var i0 = Math.floor(off / bw);
+    for (var k = 0; k <= Math.ceil(W / bw) + 1; k++) {
+      var i = i0 + k;
+      var x = Math.floor(i * bw - off);
+      var h = base + hash(i, seedK) % range;
+      rect(x, H - h, bw - 1, h, body);
+      for (var wy = H - h + 3; wy < H - 2; wy += 4)
+        for (var wx = 2; wx < bw - 3; wx += 3)
+          if (hash(i * 31 + wy, wx + seedK) % 7 === 0) rect(x + wx, wy, 1, 1, win);
+      if (neonRoof && hash(i, seedK + 5) % 4 === 0) rect(x, H - h, bw - 1, 1, NEON[hash(i, seedK + 6) % 5]);
+    }
+  }
+
+  function drawClouds(g) {
+    var off = g.dist * 0.6;
+    for (var x = 0; x < W; x++) {
+      var h = CEIL - 2 + hash(Math.floor((x + off) / 6), 9) % 4;
+      rect(x, 0, 1, h, "#1a0f33");
+      rect(x, h, 1, 1, "#2c1a4f");
+    }
+  }
+
+  function drawBuilding(g, b) {
+    var x = Math.floor(b.x);
+    if (x > W || x + b.w < -2) return;
+    var neon = NEON[b.col];
+    rect(x, b.top, b.w, H - b.top, "#0c0819");
+    rect(x, b.top, 1, H - b.top, "#211741");
+    rect(x + b.w - 1, b.top, 1, H - b.top, "#07040f");
+    rect(x, b.top + 1, b.w, 1, "#2a1d4d");
+    rect(x, b.top, b.w, 1, neon);
+    // windows
+    for (var wy = b.top + 4; wy < H - 2; wy += 5) {
+      for (var wx = 3; wx < b.w - 3; wx += 4) {
+        var hv = hash(b.id * 97 + ((wy - b.top) / 5 | 0), (wx / 4) | 0);
+        if (hv % 5 >= 2) continue;
+        if (hv % 13 === 0 && ((g.step + hv) >> 4) % 3 === 0) continue;
+        var m = (hv >>> 8) % 3;
+        rect(x + wx, wy, 2, 2, m === 0 ? "#ffd36b" : m === 1 ? "#62e8ff" : "#ff7ad9");
+      }
+    }
+    // neon sign
+    if (b.sign) {
+      var sx = x + b.sign.x, sy = b.top + b.sign.y;
+      var on = ((g.step + b.id * 17) >> 5) % 5 !== 0;
+      var sc = on ? NEON[b.sign.c] : "#2a1d4d";
+      rect(sx, sy, 9, 1, sc); rect(sx, sy + 4, 9, 1, sc);
+      rect(sx, sy, 1, 5, sc); rect(sx + 8, sy, 1, 5, sc);
+      rect(sx + 2, sy + 2, 5, 1, sc);
+    }
+    // antenna
+    if (b.ant) {
+      var ax = Math.floor(b.x + b.ant.x), tip = b.top - b.ant.h;
+      rect(ax, tip, 1, b.ant.h, "#7d7aa6");
+      for (var cy = tip + 4; cy < b.top - 1; cy += 5) rect(ax - 1, cy, 3, 1, "#5b587f");
+      if (((g.step + b.id * 13) >> 4) % 2 === 0) rect(ax - 1, tip - 1, 3, 2, "#ff3355");
+      else rect(ax, tip - 1, 1, 1, "#7a1020");
+    }
+  }
+
+  var SPR = ["ww........", ".wwww.....", "..wwwwwwww", ".bbbbb....", "bbb......."];
+  function drawPlane(g) {
+    // trail
+    var tc = ["#7fe9ff", "#4fb6d9", "#2f7ea6", "#1f4f73"];
+    for (var k = 2; k < g.trail.length; k += 2) {
+      rect(PX - 5 - k * 2, Math.round(g.trail[k]), 2, 1, tc[Math.min(3, (k / 4) | 0)]);
+    }
+    var slope = Math.max(-0.4, Math.min(0.4, g.vy * 0.18));
+    var py = Math.round(g.py);
+    for (var r = 0; r < SPR.length; r++)
+      for (var c = 0; c < SPR[r].length; c++) {
+        var ch = SPR[r][c];
+        if (ch === ".") continue;
+        rect(PX - 5 + c, py - 2 + r + Math.round((c - 5) * slope), 1, 1, ch === "w" ? "#f4f8ff" : "#9ab8e8");
+      }
+  }
+
+  function draw(g) {
+    drawSky(g);
+    drawSkyline(g, 0.25, 10, 30, 40, "#1d1540", "#4b3c8f", 11, false);
+    drawSkyline(g, 0.5, 14, 20, 50, "#140e2c", "#6b4fb0", 21, true);
+    drawClouds(g);
+    for (var i = 0; i < g.blds.length; i++) drawBuilding(g, g.blds[i]);
+    rect(0, H - 2, W, 2, "#05030c");
+    if (g.phase !== "dead") drawPlane(g);
+    for (var p = 0; p < g.parts.length; p++) {
+      var q = g.parts[p];
+      rect(Math.floor(q.x), Math.floor(q.y), 1, 1, q.c);
+    }
+    if (g.flash > 0) {
+      ctx.globalAlpha = 0.35 * g.flash / 6;
+      rect(0, 0, W, H, "#ffffff");
+      ctx.globalAlpha = 1;
+    }
+    // UI
+    if (g.phase === "ready") {
+      drawCentered("NEON PLANE", 30, "#20e3ff", 2);
+      if (((g.step >> 5) & 1) === 0) drawCentered("TAP OR SPACE TO FLY", 92, "#ffffff", 1);
+      if (g.best > 0) drawCentered("BEST " + g.best, 102, "#ffb020", 1);
+    } else {
+      drawCentered(String(g.score), 12, "#ffffff", 2);
+    }
+    if (g.phase === "dead") {
+      drawCentered("CRASH", 44, "#ff2bd6", 3);
+      drawCentered("SCORE " + g.score + "  BEST " + g.best, 68, "#ffffff", 1);
+      if (!g.demo && g.deadT > 30 && ((g.step >> 4) & 1) === 0) drawCentered("TAP TO RETRY", 80, "#7dff5a", 1);
+    }
+    if (g.demo) drawText("DEMO", 3, 3, "#ffb020", 1);
+  }
+
+  // ---------- modes ----------
+  var mode = "play", G = null, flapQ = false, last = 0, acc = 0, raf = 0;
+
+  function parseT() {
+    var m = /(?:^#|[#&])t=([0-9]*\.?[0-9]+)/.exec(location.hash);
+    return m ? parseFloat(m[1]) : null;
+  }
+
+  // demo: replay the seeded autopilot run from step 0 to exactly t
+  function renderDemo(t) {
+    var g = newGame(DEMO_SEED, true);
+    var n = Math.round(t * 60);
+    for (var i = 0; i < n; i++) update(g, false);
+    draw(g);
+    window.demoReady = true;
+  }
+
+  function frame(ts) {
+    if (mode !== "play") return;
+    if (!last) last = ts;
+    acc += Math.min(0.25, (ts - last) / 1000);
+    last = ts;
+    var n = 0;
+    while (acc >= STEP && n < 8) { update(G, flapQ); flapQ = false; acc -= STEP; n++; }
+    if (n >= 8) acc = 0;
+    draw(G);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    cancelAnimationFrame(raf);
+    window.demoReady = false;
+    var t = parseT();
+    if (t !== null) {
+      mode = "demo";
+      renderDemo(t);
+      return;
+    }
+    mode = "play";
+    G = newGame((Math.random() * 4294967296) >>> 0, false);
+    try { G.best = parseInt(localStorage.getItem("neonPlaneBest"), 10) || 0; } catch (e) {}
+    flapQ = false; last = 0; acc = 0;
+    raf = requestAnimationFrame(frame);
+  }
+
+  function press() { if (mode === "play") flapQ = true; }
+
+  addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      e.preventDefault();
+      if (!e.repeat) press();
+    }
+  });
+  addEventListener("pointerdown", function (e) { e.preventDefault(); press(); }, { passive: false });
+  addEventListener("hashchange", start);
+  addEventListener("resize", fit);
+
+  fit();
+  start();
+})();
+</script>
+</body>
+</html>
