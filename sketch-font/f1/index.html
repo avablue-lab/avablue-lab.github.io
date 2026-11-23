@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Handwriting to font</title>
+<style>
+  :root { --ink:#1d1f24; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --bad:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:var(--ink); background:#f7f7f5; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 18px 60px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 17px; margin: 28px 0 10px; }
+  p.lead { margin: 0 0 18px; color: var(--muted); line-height: 1.45; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .file { display:inline-block; background:var(--accent); color:#fff; padding:10px 16px; border-radius:8px; cursor:pointer; font-weight:600; }
+  .file input { display:none; }
+  button { font: inherit; font-weight:600; padding:10px 16px; border-radius:8px; border:1px solid var(--accent); background:#fff; color:var(--accent); cursor:pointer; }
+  button:disabled { opacity:.4; cursor:default; }
+  #status { color: var(--muted); font-size: 14px; flex: 1 1 260px; }
+  #status.bad { color: var(--bad); }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .sizeRow { display:flex; gap:10px; align-items:center; font-size:14px; color:var(--muted); margin-bottom:10px; }
+  textarea { width:100%; min-height:180px; font-size:64px; line-height:1.25; padding:12px; border:1px solid var(--line); border-radius:8px; resize:vertical; background:#fffef9; color:#111; }
+  #tiles { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+  .tile { width:62px; height:78px; border:1px solid var(--line); border-radius:6px; display:flex; flex-direction:column; align-items:center; justify-content:space-between; padding:3px 0 2px; background:#fff; }
+  .tile b { font: 11px system-ui, sans-serif; color: var(--muted); }
+  .tile span { font-size: 40px; line-height: 1; }
+  .tile.missing span { color: #ccc; }
+  canvas { width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:#fff; display:block; }
+  .legend { font-size:13px; color:var(--muted); margin-top:8px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 10px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Handwriting → .ttf</h1>
+  <p class="lead">Pick a photo of a sheet with the lowercase letters <b>a to z</b>, written in order, in rows. Lined or ruled paper is fine: printed lines are found and ignored, only your ink is traced. Everything runs in this page; nothing is uploaded.</p>
+
+  <div class="controls">
+    <label class="file">Choose photo<input type="file" id="file" accept="image/*"></label>
+    <button id="download" disabled>Download .ttf</button>
+    <span id="status">No photo yet.</span>
+  </div>
+
+  <h2>Type in your font</h2>
+  <div class="panel">
+    <div class="sizeRow">Size <input type="range" id="size" min="16" max="160" value="64"> <span id="sizeVal">64 px</span></div>
+    <textarea id="typer" spellcheck="false">the quick brown fox jumps over the lazy dog</textarea>
+    <div id="tiles"></div>
+  </div>
+
+  <h2>What I found on the sheet</h2>
+  <div class="panel">
+    <canvas id="view" width="10" height="10"></canvas>
+    <div class="legend"><i style="background:#14141e"></i>traced ink <i style="background:#999"></i>ignored specks <i style="background:#f05a5a"></i>printed lines removed <i style="background:#1a7f37"></i>letter boxes</div>
+  </div>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+const XLET = 'acemnorsuvwxz';   // x-height letters: no ascender, no descender
+const NOBASE = 'fgjpqy';        // letters that may go below the baseline
+let fontCounter = 0, currentUrl = null, currentFace = null;
+
+function setStatus(msg, bad) { const s = $('status'); s.textContent = msg; s.className = bad ? 'bad' : ''; }
+const median = a => { if (!a.length) return 0; const s = Array.from(a).sort((x, y) => x - y); return s[s.length >> 1]; };
+
+$('size').addEventListener('input', () => {
+  $('typer').style.fontSize = $('size').value + 'px';
+  $('sizeVal').textContent = $('size').value + ' px';
+});
+
+$('file').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  setStatus('Reading photo…');
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.onload = () => setTimeout(() => {
+    run(img).catch(err => { console.error(err); setStatus('Something went wrong: ' + err.message, true); })
+      .finally(() => URL.revokeObjectURL(url));
+  }, 30);
+  img.onerror = () => setStatus('That file could not be opened as an image.', true);
+  img.src = url;
+});
+
+$('download').addEventListener('click', () => {
+  if (!currentUrl) return;
+  const a = document.createElement('a');
+  a.href = currentUrl; a.download = 'my-handwriting.ttf';
+  document.body.appendChild(a); a.click(); a.remove();
+});
+
+/* ---------------- image → ink mask ---------------- */
+
+function readPage(img) {
+  const w0 = img.naturalWidth, h0 = img.naturalHeight, m = Math.max(w0, h0);
+  const k = m > 2000 ? 2000 / m : (m < 1000 ? 1000 / m : 1);
+  const W = Math.max(1, Math.round(w0 * k)), H = Math.max(1, Math.round(h0 * k));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, W, H);
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(img, 0, 0, W, H);
+  const d = cx.getImageData(0, 0, W, H).data;
+  const gray = new Float32Array(W * H);
+  for (let i = 0, j = 0; i < W * H; i++, j += 4) gray[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+  return { W, H, gray };
+}
+
+// Adaptive threshold: ink is clearly darker than the paper around it (handles shadows).
+function binarize(W, H, gray) {
+  const W1 = W + 1, I = new Float64Array(W1 * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let row = 0;
+    for (let x = 0; x < W; x++) { row += gray[y * W + x]; I[(y + 1) * W1 + x + 1] = I[y * W1 + x + 1] + row; }
+  }
+  const R = Math.max(8, Math.round(Math.max(W, H) / 40));
+  const ink = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
+      const sum = I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0];
+      const mean = sum / ((x1 - x0) * (y1 - y0));
+      const g = gray[y * W + x];
+      if (g < mean * 0.82 && mean - g > 20) ink[y * W + x] = 1;
+    }
+  }
+  return ink;
+}
+
+function runLengths(mask, W, H, vertical) {
+  const out = new Uint16Array(W * H);
+  if (vertical) {
+    for (let x = 0; x < W; x++) {
+      let y = 0;
+      while (y < H) {
+        if (!mask[y * W + x]) { y++; continue; }
+        let y2 = y; while (y2 < H && mask[y2 * W + x]) y2++;
+        const L = Math.min(65535, y2 - y);
+        for (let k = y; k < y2; k++) out[k * W + x] = L;
+        y = y2;
+      }
+    }
+  } else {
+    for (let y = 0; y < H; y++) {
+      let x = 0; const o = y * W;
+      while (x < W) {
+        if (!mask[o + x]) { x++; continue; }
+        let x2 = x; while (x2 < W && mask[o + x2]) x2++;
+        const L = Math.min(65535, x2 - x);
+        for (let k = x; k < x2; k++) out[o + k] = L;
+        x = x2;
+      }
+    }
+  }
+  return out;
+}
+
+// Thin ink (thickness <= maxThick across the line direction) and the subset that forms long runs.
+function longThin(W, H, ink, thick, maxThick, horizontal) {
+  const N = W * H, thin = new Uint8Array(N);
+  for (let i = 0; i < N; i++) thin[i] = (ink[i] && thick[i] <= maxThick) ? 1 : 0;
+  const dil = new Uint8Array(N);
+  if (horizontal) {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let v = 0;
+      for (let dy = -2; dy <= 2 && !v; dy++) { const yy = y + dy; if (yy >= 0 && yy < H && thin[yy * W + x]) v = 1; }
+      dil[y * W + x] = v;
+    }
+  } else {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let v = 0;
+      for (let dx = -2; dx <= 2 && !v; dx++) { const xx = x + dx; if (xx >= 0 && xx < W && thin[y * W + xx]) v = 1; }
+      dil[y * W + x] = v;
+    }
+  }
+  const minRun = Math.max(30, Math.round((horizontal ? W : H) * 0.05));
+  const pts = [];
+  if (horizontal) {
+    for (let y = 0; y < H; y++) {
+      let x = 0; const o = y * W;
+      while (x < W) {
+        if (!dil[o + x]) { x++; continue; }
+        let x2 = x; while (x2 < W && dil[o + x2]) x2++;
+        if (x2 - x >= minRun) for (let k = x; k < x2; k++) if (thin[o + k]) pts.push(o + k);
+        x = x2;
+      }
+    }
+  } else {
+    for (let x = 0; x < W; x++) {
+      let y = 0;
+      while (y < H) {
+        if (!dil[y * W + x]) { y++; continue; }
+        let y2 = y; while (y2 < H && dil[y2 * W + x]) y2++;
+        if (y2 - y >= minRun) for (let k = y; k < y2; k++) if (thin[k * W + x]) pts.push(k * W + x);
+        y = y2;
+      }
+    }
+  }
+  return { thin, pts };
+}
+
+// Find the page tilt that makes the long thin strokes line up best (ruled lines).
+function estimateSkew(W, H, hPts, vPts) {
+  if (hPts.length + vPts.length < 300) return 0;
+  const sample = arr => { const step = Math.max(1, Math.ceil(arr.length / 30000)); const o = []; for (let i = 0; i < arr.length; i += step) o.push(arr[i]); return o; };
+  const hs = sample(hPts), vs = sample(vPts);
+  const offY = Math.ceil(W * 0.08) + 4, offX = Math.ceil(H * 0.08) + 4;
+  const histY = new Int32Array(H + 2 * offY + 4), histX = new Int32Array(W + 2 * offX + 4);
+  function score(deg) {
+    const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+    histY.fill(0); histX.fill(0);
+    for (const i of hs) { const x = i % W + 0.5, y = ((i / W) | 0) + 0.5; histY[Math.floor(-x * s + y * c) + offY]++; }
+    for (const i of vs) { const x = i % W + 0.5, y = ((i / W) | 0) + 0.5; histX[Math.floor(x * c + y * s) + offX]++; }
+    let t = 0;
+    for (let k = 0; k < histY.length; k++) t += histY[k] * histY[k];
+    for (let k = 0; k < histX.length; k++) t += histX[k] * histX[k];
+    return t;
+  }
+  let best = 0, bs = -1;
+  for (let d = -4; d <= 4.0001; d += 0.25) { const v = score(d); if (v > bs) { bs = v; best = d; } }
+  const c0 = best;
+  for (let d = c0 - 0.25; d <= c0 + 0.2501; d += 0.05) { const v = score(d); if (v > bs) { bs = v; best = d; } }
+  return best * Math.PI / 180;
+}
+
+function removeLines(W, H, ink) {
+  const N = W * H, maxThick = Math.max(4, Math.round(Math.max(W, H) / 300));
+  const vrun = runLengths(ink, W, H, true), hrun = runLengths(ink, W, H, false);
+  const HL = longThin(W, H, ink, vrun, maxThick, true);
+  const VL = longThin(W, H, ink, hrun, maxThick, false);
+  let angle = estimateSkew(W, H, HL.pts, VL.pts);
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const offY = Math.ceil(W * 0.08) + 4, offX = Math.ceil(H * 0.08) + 4;
+  const histY = new Float64Array(H + 2 * offY + 4), histX = new Float64Array(W + 2 * offX + 4);
+  for (const i of HL.pts) { const x = i % W + 0.5, y = ((i / W) | 0) + 0.5; histY[Math.floor(-x * s + y * c) + offY]++; }
+  for (const i of VL.pts) { const x = i % W + 0.5, y = ((i / W) | 0) + 0.5; histX[Math.floor(x * c + y * s) + offX]++; }
+  const bandY = new Uint8Array(histY.length), bandX = new Uint8Array(histX.length);
+  const mark = (hist, band, thr) => {
+    for (let b = 1; b < hist.length - 1; b++)
+      if (hist[b - 1] + hist[b] + hist[b + 1] >= thr)
+        for (let k = Math.max(0, b - 2); k <= Math.min(band.length - 1, b + 2); k++) band[k] = 1;
+    let n = 0; for (let b = 0; b < band.length; b++) if (band[b] && (b === 0 || !band[b - 1])) n++;
+    return n;
+  };
+  const nH = mark(histY, bandY, 0.25 * W), nV = mark(histX, bandX, 0.25 * H);
+  const line = new Uint8Array(N), clean = new Uint8Array(N);
+  if (nH + nV === 0) angle = 0;
+  for (let i = 0; i < N; i++) {
+    if (!ink[i]) continue;
+    if (nH + nV) {
+      const x = i % W + 0.5, y = ((i / W) | 0) + 0.5;
+      if (HL.thin[i] && bandY[Math.floor(-x * s + y * c) + offY]) { line[i] = 1; continue; }
+      if (VL.thin[i] && bandX[Math.floor(x * c + y * s) + offX]) { line[i] = 1; continue; }
+    }
+    clean[i] = 1;
+  }
+  return { clean, line, angle, nLines: nH + nV, maxThick };
+}
+
+/* ---------------- ink → letters ---------------- */
+
+function components(W, H, mask) {
+  const N = W * H, lab = new Int32Array(N), stack = new Int32Array(N), comps = [];
+  let n = 0;
+  for (let i = 0; i < N; i++) {
+    if (!mask[i] || lab[i]) continue;
+    n++;
+    let sp = 0; stack[sp++] = i; lab[i] = n;
+    let minx = W, maxx = -1, miny = H, maxy = -1, area = 0;
+    while (sp) {
+      const p = stack[--sp], x = p % W, y = (p - x) / W;
+      area++;
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= W) continue;
+          const q = yy * W + xx;
+          if (mask[q] && !lab[q]) { lab[q] = n; stack[sp++] = q; }
+        }
+      }
+    }
+    comps.push({ id: n, minx, maxx, miny, maxy, area, w: maxx - minx + 1, h: maxy - miny + 1 });
+  }
+  const start = new Int32Array(n + 2);
+  for (let i = 0; i < N; i++) if (lab[i]) start[lab[i] + 1]++;
+  for (let k = 1; k <= n + 1; k++) start[k] += start[k - 1];
+  const fill = start.slice(), pix = new Int32Array(start[n + 1]);
+  for (let i = 0; i < N; i++) if (lab[i]) pix[fill[lab[i]]++] = i;
+  for (const c of comps) c.pix = pix.subarray(start[c.id], start[c.id + 1]);
+  return comps;
+}
+
+function makeGroup(pix, W, c, s) {
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9, minxR = 1e9, maxxR = -1e9, minyR = 1e9, maxyR = -1e9;
+  for (let k = 0; k < pix.length; k++) {
+    const p = pix[k], x = p % W, y = (p - x) / W;
+    if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+    const X = x + 0.5, Y = y + 0.5, xr = X * c + Y * s, yr = -X * s + Y * c;
+    if (xr < minxR) minxR = xr; if (xr > maxxR) maxxR = xr; if (yr < minyR) minyR = yr; if (yr > maxyR) maxyR = yr;
+  }
+  return { pix, area: pix.length, minx, maxx, miny, maxy, minxR, maxxR, minyR, maxyR,
+    cxR: (minxR + maxxR) / 2, cyR: (minyR + maxyR) / 2, wR: maxxR - minxR + 1, hR: maxyR - minyR + 1 };
+}
+
+function concatPix(a, b) { const p = new Int32Array(a.length + b.length); p.set(a); p.set(b, a.length); return p; }
+
+function findLetters(W, H, clean, angle, maxThick) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const minA = Math.max(6, Math.round(Math.pow(Math.max(W, H) / 1000, 2) * 5));
+  let cs = components(W, H, clean).filter(k => k.area >= minA);
+  cs = cs.filter(k => k.w < 0.5 * W && k.h < 0.5 * H);
+  cs = cs.filter(k => !(k.h <= maxThick + 1 && k.w > 5 * k.h));      // leftover bits of ruled lines
+  const touches = k => k.minx <= 1 || k.miny <= 1 || k.maxx >= W - 2 || k.maxy >= H - 2;
+  const inner = cs.filter(k => !touches(k));
+  const areasOf = arr => arr.map(k => k.area).sort((a, b) => b - a);
+  let areas = areasOf(inner.length ? inner : cs);
+  if (!areas.length) return null;
+  let ref = areas[Math.min(12, areas.length - 1)];
+  cs = cs.filter(k => !touches(k) || (k.area >= 0.3 * ref && k.area <= 2.5 * ref));
+  cs = cs.filter(k => k.area >= ref * 0.012);
+  if (!cs.length) return null;
+  areas = areasOf(cs); ref = areas[Math.min(12, areas.length - 1)];
+  const hRef = median(cs.filter(k => k.area >= 0.25 * ref).map(k => k.h)) || 20;
+
+  // Join pieces of one letter: dots of i/j, broken strokes.
+  const P = cs.map((_, i) => i);
+  const find = i => { while (P[i] !== i) { P[i] = P[P[i]]; i = P[i]; } return i; };
+  const uni = (a, b) => { a = find(a); b = find(b); if (a !== b) P[a] = b; };
+  for (let i = 0; i < cs.length; i++) {
+    const a = cs[i]; let best = -1, bestGap = 1e9;
+    for (let j = 0; j < cs.length; j++) {
+      if (i === j) continue;
+      const b = cs[j];
+      const ov = Math.min(a.maxx, b.maxx) - Math.max(a.minx, b.minx) + 1;
+      const gap = Math.max(0, Math.max(a.miny, b.miny) - Math.min(a.maxy, b.maxy));
+      if (ov >= 0.6 * Math.min(a.w, b.w) && gap < 0.15 * hRef && Math.min(a.area, b.area) < 0.3 * ref) uni(i, j);
+      if (a.area < 0.4 * b.area && a.h < 0.6 * hRef) {
+        const acx = (a.minx + a.maxx) / 2;
+        const near = ov >= 0.3 * a.w || (acx >= b.minx - 0.15 * b.w && acx <= b.maxx + 0.15 * b.w);
+        if (near && gap < 0.6 * hRef && gap < bestGap) { bestGap = gap; best = j; }
+      }
+    }
+    if (best >= 0) uni(i, best);
+  }
+  const byRoot = new Map();
+  cs.forEach((k, i) => { const r = find(i); if (!byRoot.has(r)) byRoot.set(r, []); byRoot.get(r).push(k); });
+  let groups = [];
+  for (const members of byRoot.values()) {
+    let pix = members[0].pix;
+    for (let m = 1; m < members.length; m++) pix = concatPix(pix, members[m].pix);
+    groups.push(makeGroup(pix, W, c, s));
+  }
+  groups = groups.filter(g => g.area >= 0.05 * ref);
+  if (!groups.length) return null;
+
+  // Rows: sort by height on the (de-skewed) page, split at big jumps.
+  groups.sort((a, b) => a.cyR - b.cyR);
+  const hR = median(groups.map(g => g.hR)) || hRef;
+  const rows = [[groups[0]]];
+  for (let k = 1; k < groups.length; k++) {
+    if (groups[k].cyR - groups[k - 1].cyR > 0.5 * hR) rows.push([]);
+    rows[rows.length - 1].push(groups[k]);
+  }
+  rows.forEach(r => r.sort((a, b) => a.cxR - b.cxR));
+  const count = () => rows.reduce((n, r) => n + r.length, 0);
+
+  // Too many: drop specks, then join the closest neighbours.
+  let guard = 0;
+  while (count() > 26 && guard++ < 300) {
+    let sm = null, smR = -1, smK = -1;
+    rows.forEach((r, ri) => r.forEach((g, k) => { if (!sm || g.area < sm.area) { sm = g; smR = ri; smK = k; } }));
+    if (sm.area < 0.2 * ref) { rows[smR].splice(smK, 1); continue; }
+    let best = null;
+    rows.forEach((r, ri) => { for (let k = 0; k + 1 < r.length; k++) { const gap = r[k + 1].minxR - r[k].maxxR; if (!best || gap < best.gap) best = { ri, k, gap }; } });
+    if (!best) break;
+    const r = rows[best.ri];
+    r.splice(best.k, 2, makeGroup(concatPix(r[best.k].pix, r[best.k + 1].pix), W, c, s));
+  }
+  // Too few: letters that touch. Split the widest blob at its thinnest column.
+  let splits = 0;
+  while (count() < 26 && guard++ < 300) {
+    const mw = median(rows.flat().map(g => g.wR));
+    let tg = null, tr = -1, tk = -1;
+    rows.forEach((r, ri) => r.forEach((g, k) => { if (!tg || g.wR > tg.wR) { tg = g; tr = ri; tk = k; } }));
+    if (!tg || tg.wR / mw < 1.45) break;
+    const lo = Math.floor(tg.minxR), nb = Math.ceil(tg.maxxR) - lo + 1, hist = new Int32Array(nb);
+    for (let q = 0; q < tg.pix.length; q++) {
+      const p = tg.pix[q], x = p % W + 0.5, y = ((p - (p % W)) / W) + 0.5;
+      hist[Math.floor(x * c + y * s) - lo]++;
+    }
+    const a0 = Math.floor(0.3 * nb), a1 = Math.ceil(0.7 * nb), mid = nb / 2;
+    let cut = -1, cv = 1e9;
+    for (let b = a0; b <= a1 && b < nb; b++) {
+      const v = hist[b] + Math.abs(b - mid) * 0.01;
+      if (v < cv) { cv = v; cut = b; }
+    }
+    if (cut < 0) break;
+    const L = [], R = [];
+    for (let q = 0; q < tg.pix.length; q++) {
+      const p = tg.pix[q], x = p % W + 0.5, y = ((p - (p % W)) / W) + 0.5;
+      (Math.floor(x * c + y * s) - lo < cut ? L : R).push(p);
+    }
+    if (!L.length || !R.length) break;
+    rows[tr].splice(tk, 1, makeGroup(Int32Array.from(L), W, c, s), makeGroup(Int32Array.from(R), W, c, s));
+    splits++;
+  }
+
+  const list = [];
+  rows.forEach((r, ri) => r.forEach(g => { g.row = ri; list.push(g); }));
+  list.forEach((g, i) => { g.letter = i < 26 ? LETTERS[i] : null; });
+
+  // Per-row baseline (fit through non-descender bottoms) and x-height.
+  const xhAll = median(list.filter(g => g.letter && XLET.includes(g.letter)).map(g => g.hR)) || hR * 0.8;
+  const rowInfo = rows.map(r => {
+    const pts = r.filter(g => g.letter && !NOBASE.includes(g.letter)).map(g => [g.cxR, g.maxyR + 0.5]);
+    const xs = r.filter(g => g.letter && XLET.includes(g.letter)).map(g => g.hR);
+    let fit = fitLine(pts, hR);
+    if (!fit) fit = { b: median(r.map(g => g.maxyR + 0.5)), m: 0 };
+    const xh = xs.length >= 2 ? median(xs) : xhAll;
+    return { b: fit.b, m: fit.m, xh };
+  });
+  return { rows, list, rowInfo, hR, splits, c, s };
+}
+
+function lsq(pts) {
+  let n = pts.length, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const [x, y] of pts) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
+  const den = n * sxx - sx * sx;
+  if (Math.abs(den) < 1e-9) return { m: 0, b: sy / n };
+  const m = (n * sxy - sx * sy) / den;
+  return { m, b: (sy - m * sx) / n };
+}
+function fitLine(pts, hR) {
+  if (!pts.length) return null;
+  const ys = pts.map(p => p[1]);
+  if (pts.length < 3) return { b: median(ys), m: 0 };
+  let f = lsq(pts);
+  const keep = pts.filter(p => Math.abs(p[1] - (f.b + f.m * p[0])) < 0.15 * hR);
+  if (keep.length >= 3) f = lsq(keep);
+  if (Math.abs(f.m) > 0.08) return { b: median(ys), m: 0 };
+  return f;
+}
+
+/* ---------------- letter → outline ---------------- */
+
+// Trace pixel-edge boundaries. Ink is always on the right of the walking direction,
+// so outer outlines and holes come out with opposite winding.
+function traceContours(mask, w, h) {
+  const VW = w + 1, VH = h + 1;
+  const out = new Int8Array(VW * VH * 2).fill(-1);
+  const at = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? mask[y * w + x] : 0;
+  const add = (vx, vy, d) => { const v = (vy * VW + vx) * 2; if (out[v] < 0) out[v] = d; else out[v + 1] = d; };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!mask[y * w + x]) continue;
+    if (!at(x, y - 1)) add(x, y, 0);
+    if (!at(x + 1, y)) add(x + 1, y, 1);
+    if (!at(x, y + 1)) add(x + 1, y + 1, 2);
+    if (!at(x - 1, y)) add(x, y + 1, 3);
+  }
+  const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
+  const loops = [];
+  for (let slot = 0; slot < out.length; slot++) {
+    if (out[slot] < 0) continue;
+    const v0 = slot >> 1, sx = v0 % VW, sy = (v0 - sx) / VW;
+    let x = sx, y = sy, d = out[slot]; out[slot] = -1;
+    const pts = [];
+    for (let guard = 0; guard < 4 * VW * VH + 8; guard++) {
+      pts.push(x, y);
+      x += DX[d]; y += DY[d];
+      if (x === sx && y === sy) break;
+      const b = (y * VW + x) * 2;
+      let pick = -1;
+      const prefs = [(d + 3) & 3, d, (d + 1) & 3];   // left turn first joins diagonal pixels
+      for (const nd of prefs) {
+        if (out[b] === nd) { pick = b; break; }
+        if (out[b + 1] === nd) { pick = b + 1; break; }
+      }
+      if (pick < 0) break;
+      d = out[pick]; out[pick] = -1;
+    }
+    if (pts.length >= 8) loops.push(pts);
+  }
+  return loops;
+}
+
+function smoothLoop(xs, ys, passes) {
+  const n = xs.length;
+  for (let p = 0; p < passes; p++) {
+    const nx = new Float64Array(n), ny = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = (i - 1 + n) % n, b = (i + 1) % n;
+      nx[i] = (xs[a] + 2 * xs[i] + xs[b]) / 4;
+      ny[i] = (ys[a] + 2 * ys[i] + ys[b]) / 4;
+    }
+    xs = nx; ys = ny;
+  }
+  return [xs, ys];
+}
+
+function loopArea(xs, ys) {
+  let a = 0; const n = xs.length;
+  for (let i = 0; i < n; i++) { const j = (i + 1) % n; a += xs[i] * ys[j] - xs[j] * ys[i]; }
+  return a / 2;
+}
+
+function rdpClosed(xs, ys, eps) {
+  const n = xs.length;
+  if (n <= 4) return Array.from({ length: n }, (_, i) => i);
+  let far = 0, fd = -1;
+  for (let i = 1; i < n; i++) { const d = (xs[i] - xs[0]) ** 2 + (ys[i] - ys[0]) ** 2; if (d > fd) { fd = d; far = i; } }
+  const keep = new Uint8Array(n); keep[0] = 1; keep[far] = 1;
+  const stack = [[0, far], [far, n]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const ax = xs[a % n], ay = ys[a % n], bx = xs[b % n], by = ys[b % n];
+    const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+    let dm = -1, km = -1;
+    for (let k = a + 1; k < b; k++) {
+      const px = xs[k] - ax, py = ys[k] - ay;
+      const d = len < 1e-9 ? Math.hypot(px, py) : Math.abs(px * dy - py * dx) / len;
+      if (d > dm) { dm = d; km = k; }
+    }
+    if (dm > eps) { keep[km] = 1; stack.push([a, km], [km, b]); }
+  }
+  const idx = [];
+  for (let i = 0; i < n; i++) if (keep[i]) idx.push(i);
+  return idx;
+}
+
+function signedArea(P) {
+  let a = 0;
+  for (let i = 0; i < P.length; i++) { const p = P[i], q = P[(i + 1) % P.length]; a += p[0] * q[1] - q[0] * p[1]; }
+  return a / 2;
+}
+
+// Simplified polygon → smooth TrueType quadratic contour (vertices become control points).
+function toQuad(P) {
+  const n = P.length;
+  if (n < 3) return null;
+  if (n < 4) return P.map(p => ({ x: Math.round(p[0]), y: Math.round(p[1]), on: true }));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p = P[i], q = P[(i + 1) % n];
+    out.push({ x: Math.round((p[0] + q[0]) / 2), y: Math.round((p[1] + q[1]) / 2), on: true });
+    out.push({ x: Math.round(q[0]), y: Math.round(q[1]), on: false });
+  }
+  return out;
+}
+
+const LSB = 50;
+function buildGlyph(g, W, c, s, row, hR) {
+  const w = g.maxx - g.minx + 1, h = g.maxy - g.miny + 1;
+  const mask = new Uint8Array(w * h);
+  for (let k = 0; k < g.pix.length; k++) {
+    const p = g.pix[k], x = p % W, y = (p - x) / W;
+    mask[(y - g.miny) * w + (x - g.minx)] = 1;
+  }
+  const loops = traceContours(mask, w, h);
+  const eps = Math.max(0.45, hR * 0.006), minA = Math.max(3, (hR * 0.03) ** 2);
+  const polys = [];
+  for (const L of loops) {
+    const n = L.length / 2;
+    let xs = new Float64Array(n), ys = new Float64Array(n);
+    for (let i = 0; i < n; i++) { xs[i] = L[2 * i] + g.minx; ys[i] = L[2 * i + 1] + g.miny; }
+    [xs, ys] = smoothLoop(xs, ys, 2);
+    if (Math.abs(loopArea(xs, ys)) < minA) continue;
+    const rx = new Float64Array(n), ry = new Float64Array(n);
+    for (let i = 0; i < n; i++) { rx[i] = xs[i] * c + ys[i] * s; ry[i] = -xs[i] * s + ys[i] * c; }
+    const keep = rdpClosed(rx, ry, eps);
+    if (keep.length < 3) continue;
+    polys.push(keep.map(k => [rx[k], ry[k]]));
+  }
+  if (!polys.length) return null;
+  let l = Infinity, r = -Infinity;
+  for (const P of polys) for (const p of P) { if (p[0] < l) l = p[0]; if (p[0] > r) r = p[0]; }
+  const sc = 500 / Math.max(1, row.xh);
+  const base = row.b + row.m * g.cxR;
+  const fp = polys.map(P => P.map(([x, y]) => [(x - l) * sc + LSB, (base - y) * sc]));
+  const areas = fp.map(signedArea);
+  let bi = 0; areas.forEach((a, i) => { if (Math.abs(a) > Math.abs(areas[bi])) bi = i; });
+  if (areas[bi] > 0) fp.forEach(P => P.reverse());   // TrueType: outer outlines clockwise
+  const contours = fp.map(toQuad).filter(Boolean);
+  return { contours, adv: Math.max(100, Math.round((r - l) * sc + 2 * LSB)) };
+}
+
+/* ---------------- TrueType writer ---------------- */
+
+class Bytes {
+  constructor() { this.a = []; }
+  u8(v) { this.a.push(v & 255); }
+  u16(v) { v &= 0xFFFF; this.a.push(v >> 8, v & 255); }
+  i16(v) { this.u16(Math.round(v)); }
+  u32(v) { v >>>= 0; this.a.push(v >>> 24, (v >>> 16) & 255, (v >>> 8) & 255, v & 255); }
+  tag(s) { for (let i = 0; i < 4; i++) this.a.push(s.charCodeAt(i)); }
+  bytes(x) { for (let i = 0; i < x.length; i++) this.a.push(x[i]); }
+  pad4() { while (this.a.length % 4) this.a.push(0); }
+  get length() { return this.a.length; }
+  out() { return new Uint8Array(this.a); }
+}
+
+function checksum(d) {
+  let s = 0;
+  for (let i = 0; i < d.length; i += 4)
+    s = (s + (((d[i] << 24) | ((d[i + 1] || 0) << 16) | ((d[i + 2] || 0) << 8) | (d[i + 3] || 0)) >>> 0)) >>> 0;
+  return s;
+}
+
+function encodeGlyph(contours) {
+  if (!contours || !contours.length) return { bytes: new Uint8Array(0), nC: 0, nP: 0 };
+  let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity, nP = 0;
+  for (const C of contours) for (const p of C) {
+    nP++;
+    if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x; if (p.y < yMin) yMin = p.y; if (p.y > yMax) yMax = p.y;
+  }
+  const b = new Bytes();
+  b.i16(contours.length); b.i16(xMin); b.i16(yMin); b.i16(xMax); b.i16(yMax);
+  let end = -1;
+  for (const C of contours) { end += C.length; b.u16(end); }
+  b.u16(0);                                    // no instructions
+  for (const C of contours) for (const p of C) b.u8(p.on ? 1 : 0);   // int16 deltas for x and y
+  let px = 0; for (const C of contours) for (const p of C) { b.i16(p.x - px); px = p.x; }
+  let py = 0; for (const C of contours) for (const p of C) { b.i16(p.y - py); py = p.y; }
+  b.pad4();
+  return { bytes: b.out(), nC: contours.length, nP, xMin, yMin, xMax, yMax };
+}
+
+function utf16be(str) { const o = []; for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); o.push(c >> 8, c & 255); } return o; }
+
+function buildFont(glyphs, family) {
+  const enc = glyphs.map(g => encodeGlyph(g.contours));
+  const numGlyphs = glyphs.length;
+  const glyf = new Bytes(), loca = new Bytes();
+  let off = 0;
+  for (const e of enc) { loca.u32(off); glyf.bytes(e.bytes); off += e.bytes.length; }
+  loca.u32(off);
+
+  let xMin = 0, yMin = 0, xMax = 0, yMax = 0, first = true, maxPts = 0, maxC = 0;
+  let advMax = 0, minLsb = 0, minRsb = 0, xMaxExt = 0, firstM = true, advSum = 0, advN = 0;
+  enc.forEach((e, i) => {
+    const adv = glyphs[i].adv;
+    advMax = Math.max(advMax, adv);
+    if (adv > 0) { advSum += adv; advN++; }
+    if (!e.nC) return;
+    if (first) { xMin = e.xMin; yMin = e.yMin; xMax = e.xMax; yMax = e.yMax; first = false; }
+    else { xMin = Math.min(xMin, e.xMin); yMin = Math.min(yMin, e.yMin); xMax = Math.max(xMax, e.xMax); yMax = Math.max(yMax, e.yMax); }
+    maxPts = Math.max(maxPts, e.nP); maxC = Math.max(maxC, e.nC);
+    const rsb = adv - e.xMax, ext = e.xMax;
+    if (firstM) { minLsb = e.xMin; minRsb = rsb; xMaxExt = ext; firstM = false; }
+    else { minLsb = Math.min(minLsb, e.xMin); minRsb = Math.min(minRsb, rsb); xMaxExt = Math.max(xMaxExt, ext); }
+  });
+  const asc = Math.max(800, yMax + 30), desc = Math.min(-250, yMin - 30);
+
+  const head = new Bytes();
+  head.u32(0x00010000); head.u32(0x00010000); head.u32(0); head.u32(0x5F0F3CF5);
+  head.u16(0x000B); head.u16(1000);
+  const t = Math.floor(Date.now() / 1000) + 2082844800;
+  head.u32(0); head.u32(t); head.u32(0); head.u32(t);
+  head.i16(xMin); head.i16(yMin); head.i16(xMax); head.i16(yMax);
+  head.u16(0); head.u16(8); head.i16(2); head.i16(1); head.i16(0);
+
+  const hhea = new Bytes();
+  hhea.u32(0x00010000); hhea.i16(asc); hhea.i16(desc); hhea.i16(0);
+  hhea.u16(advMax); hhea.i16(minLsb); hhea.i16(minRsb); hhea.i16(xMaxExt);
+  hhea.i16(1); hhea.i16(0); hhea.i16(0);
+  hhea.i16(0); hhea.i16(0); hhea.i16(0); hhea.i16(0);
+  hhea.i16(0); hhea.u16(numGlyphs);
+
+  const hmtx = new Bytes();
+  enc.forEach((e, i) => { hmtx.u16(glyphs[i].adv); hmtx.i16(e.nC ? e.xMin : 0); });
+
+  const maxp = new Bytes();
+  maxp.u32(0x00010000); maxp.u16(numGlyphs); maxp.u16(maxPts); maxp.u16(maxC);
+  maxp.u16(0); maxp.u16(0); maxp.u16(2);
+  for (let k = 0; k < 8; k++) maxp.u16(0);
+
+  const post = new Bytes();
+  post.u32(0x00030000); post.u32(0); post.i16(-100); post.i16(50);
+  for (let k = 0; k < 5; k++) post.u32(0);
+
+  // cmap format 4: space → 1, A–Z and a–z → 2..27
+  const segs = [[0x20, 0x20, 1], [0x41, 0x5A, 2], [0x61, 0x7A, 2], [0xFFFF, 0xFFFF, 0]];
+  const segN = segs.length;
+  const sub = new Bytes();
+  const es = Math.floor(Math.log2(segN)), sr = 2 * (1 << es);
+  sub.u16(4); sub.u16(16 + 8 * segN); sub.u16(0);
+  sub.u16(segN * 2); sub.u16(sr); sub.u16(es); sub.u16(segN * 2 - sr);
+  segs.forEach(sg => sub.u16(sg[1]));
+  sub.u16(0);
+  segs.forEach(sg => sub.u16(sg[0]));
+  segs.forEach(sg => sub.u16(sg[0] === 0xFFFF ? 1 : (sg[2] - sg[0])));
+  segs.forEach(() => sub.u16(0));
+  const cmap = new Bytes();
+  cmap.u16(0); cmap.u16(1); cmap.u16(3); cmap.u16(1); cmap.u32(12);
+  cmap.bytes(sub.a);
+
+  const ps = family.replace(/[^A-Za-z0-9]/g, '') + '-Regular';
+  const names = [[1, family], [2, 'Regular'], [3, family + ' Regular ' + new Date().toISOString().slice(0, 10)],
+    [4, family + ' Regular'], [5, 'Version 1.000'], [6, ps]];
+  const name = new Bytes(), strs = [];
+  name.u16(0); name.u16(names.length); name.u16(6 + 12 * names.length);
+  for (const [id, str] of names) {
+    const bytes = utf16be(str);
+    name.u16(3); name.u16(1); name.u16(0x409); name.u16(id); name.u16(bytes.length); name.u16(strs.length);
+    for (const x of bytes) strs.push(x);
+  }
+  name.bytes(strs);
+
+  const os2 = new Bytes();
+  os2.u16(4); os2.i16(advN ? Math.round(advSum / advN) : 500); os2.u16(400); os2.u16(5); os2.u16(0);
+  os2.i16(650); os2.i16(600); os2.i16(0); os2.i16(75);
+  os2.i16(650); os2.i16(600); os2.i16(0); os2.i16(350);
+  os2.i16(50); os2.i16(250); os2.i16(0);
+  for (let k = 0; k < 10; k++) os2.u8(0);
+  os2.u32(1); os2.u32(0); os2.u32(0); os2.u32(0);
+  os2.tag('NONE');
+  os2.u16(0x0040); os2.u16(0x20); os2.u16(0x7A);
+  os2.i16(asc); os2.i16(desc); os2.i16(0);
+  os2.u16(asc); os2.u16(-desc);
+  os2.u32(1); os2.u32(0);
+  os2.i16(500); os2.i16(700); os2.u16(0); os2.u16(0x20); os2.u16(1);
+
+  const tables = { 'OS/2': os2.out(), cmap: cmap.out(), glyf: glyf.out(), head: head.out(), hhea: hhea.out(),
+    hmtx: hmtx.out(), loca: loca.out(), maxp: maxp.out(), name: name.out(), post: post.out() };
+  const tags = Object.keys(tables).sort();
+  const nT = tags.length, tes = Math.floor(Math.log2(nT)), tsr = 16 * (1 << tes);
+  const font = new Bytes();
+  font.u32(0x00010000); font.u16(nT); font.u16(tsr); font.u16(tes); font.u16(nT * 16 - tsr);
+  let offset = 12 + 16 * nT, headOff = 0;
+  for (const tg of tags) {
+    const d = tables[tg];
+    font.tag(tg); font.u32(checksum(d)); font.u32(offset); font.u32(d.length);
+    if (tg === 'head') headOff = offset;
+    offset += (d.length + 3) & ~3;
+  }
+  for (const tg of tags) { font.bytes(tables[tg]); font.pad4(); }
+  const out = font.out();
+  const adj = (0xB1B0AFBA - checksum(out)) >>> 0;
+  out[headOff + 8] = adj >>> 24; out[headOff + 9] = (adj >>> 16) & 255; out[headOff + 10] = (adj >>> 8) & 255; out[headOff + 11] = adj & 255;
+  return out;
+}
+
+function notdefGlyph() {
+  const P = (pts) => pts.map(([x, y]) => ({ x, y, on: true }));
+  return { contours: [P([[50, 0], [50, 700], [450, 700], [450, 0]]), P([[100, 50], [400, 50], [400, 650], [100, 650]])], adv: 500 };
+}
+
+/* ---------------- view ---------------- */
+
+function drawView(W, H, gray, clean, line, found) {
+  const cv = $('view'); cv.width = W; cv.height = H;
+  const cx = cv.getContext('2d');
+  const im = cx.createImageData(W, H), d = im.data;
+  const used = new Uint8Array(W * H);
+  if (found) for (const g of found.list) for (let k = 0; k < g.pix.length; k++) used[g.pix[k]] = 1;
+  for (let i = 0, j = 0; i < W * H; i++, j += 4) {
+    let r, g, b;
+    if (used[i]) { r = 20; g = 20; b = 30; }
+    else if (clean[i]) { r = g = b = 153; }
+    else if (line[i]) { r = 240; g = 90; b = 90; }
+    else { r = g = b = Math.min(255, 232 + gray[i] * 0.09); }
+    d[j] = r; d[j + 1] = g; d[j + 2] = b; d[j + 3] = 255;
+  }
+  cx.putImageData(im, 0, 0);
+  if (!found) return;
+  const lw = Math.max(2, W / 600), fs = Math.max(14, Math.round(W / 55));
+  cx.lineWidth = lw; cx.font = `bold ${fs}px system-ui, sans-serif`; cx.textBaseline = 'bottom';
+  for (const g of found.list) {
+    cx.strokeStyle = g.letter ? '#1a7f37' : '#c33';
+    cx.strokeRect(g.minx - 3, g.miny - 3, g.maxx - g.minx + 7, g.maxy - g.miny + 7);
+    cx.fillStyle = g.letter ? '#1a7f37' : '#c33';
+    cx.fillText(g.letter || '?', g.minx - 3, g.miny - 4);
+  }
+}
+
+function showTiles(family, have) {
+  const box = $('tiles'); box.innerHTML = '';
+  for (const ch of LETTERS) {
+    const t = document.createElement('div'); t.className = 'tile' + (have[ch] ? '' : ' missing');
+    const lab = document.createElement('b'); lab.textContent = ch;
+    const sp = document.createElement('span'); sp.textContent = ch; sp.style.fontFamily = `"${family}", cursive`;
+    t.append(lab, sp); box.appendChild(t);
+  }
+}
+
+/* ---------------- main ---------------- */
+
+async function run(img) {
+  const t0 = performance.now();
+  setStatus('Finding ink…');
+  const { W, H, gray } = readPage(img);
+  const ink = binarize(W, H, gray);
+  const { clean, line, angle, nLines, maxThick } = removeLines(W, H, ink);
+  const found = findLetters(W, H, clean, angle, maxThick);
+  drawView(W, H, gray, clean, line, found);
+  if (!found || found.list.length < 5) {
+    setStatus('I could not find the letters. Try a sharper, well-lit photo with dark ink.', true);
+    return;
+  }
+
+  const glyphs = [notdefGlyph(), { contours: [], adv: 300 }];
+  const have = {};
+  const byLetter = {};
+  for (const g of found.list) if (g.letter) byLetter[g.letter] = g;
+  let advs = [];
+  for (const ch of LETTERS) {
+    const g = byLetter[ch];
+    let gl = null;
+    if (g) gl = buildGlyph(g, W, found.c, found.s, found.rowInfo[g.row], found.hR);
+    if (gl && gl.contours.length) { glyphs.push(gl); have[ch] = true; advs.push(gl.adv); }
+    else glyphs.push({ contours: [], adv: 400 });
+  }
+  if (advs.length) glyphs[1].adv = Math.round(median(advs) * 0.75);
+
+  const family = 'My Handwriting';
+  const ttf = buildFont(glyphs, family);
+
+  const fam = 'HandFont' + (++fontCounter);
+  const face = new FontFace(fam, ttf.buffer.slice(0));
+  try {
+    await face.load();
+  } catch (e) {
+    setStatus('The font was built but the browser refused to load it (' + e.message + '). You can still download it.', true);
+  }
+  if (currentFace) { try { document.fonts.delete(currentFace); } catch (_) {} }
+  document.fonts.add(face); currentFace = face;
+  $('typer').style.fontFamily = `"${fam}", cursive`;
+  showTiles(fam, have);
+
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  currentUrl = URL.createObjectURL(new Blob([ttf], { type: 'font/ttf' }));
+  $('download').disabled = false;
+  window.sketchFont = { found: found.list.length, rows: found.rows.length, letters: Object.keys(have).length, family: fam, ttf };
+
+  const n = found.list.length, got = Object.keys(have).length;
+  const missing = LETTERS.split('').filter(ch => !have[ch]).join(' ');
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  let msg = `Found ${n} letter shape${n === 1 ? '' : 's'} in ${found.rows.length} row${found.rows.length === 1 ? '' : 's'}`;
+  if (nLines) msg += `, ignored ${nLines} printed line${nLines === 1 ? '' : 's'}`;
+  if (Math.abs(angle) > 0.0005) msg += ` (page tilted ${(angle * 180 / Math.PI).toFixed(1)}°)`;
+  msg += `. Font: ${got} of 26 letters, ${(ttf.length / 1024).toFixed(1)} KB, ${secs} s.`;
+  if (n !== 26) msg += ` Expected 26, so check the green labels below.`;
+  if (missing) msg += ` Missing: ${missing}.`;
+  if (found.splits) msg += ` Split ${found.splits} touching pair${found.splits === 1 ? '' : 's'}.`;
+  setStatus(msg, n !== 26 || got < 26);
+}
+</script>
+</body>
+</html>
