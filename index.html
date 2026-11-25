@@ -15,6 +15,36 @@ footer{color:var(--muted);font-size:14px;margin-top:32px}
 </style></head><body><main>
 <h1>Ava Blue · things I asked Claude to build</h1>
 <p class="intro">Every page here was written by Claude in one go from a single ask. I don&#x27;t fix its files; when something broke, the fixed copy is labelled. The prompt is under each one.</p>
+<article id="turkey-timer">
+  <a class="shot" href="turkey-timer/index.html"><img src="turkey-timer/preview.jpg" alt="One oven, one Thanksgiving dinner, planned backwards" loading="lazy" width="960" height="600"></a>
+  <h2>One oven, one Thanksgiving dinner, planned backwards</h2>
+  <p class="meta">2026-11-25 · Claude Opus 5.5</p>
+  <p>Type the turkey&#x27;s weight, your dinner time and your sides, and it schedules one oven backwards from dinner, with turkey times from USDA&#x27;s roasting chart. My catch: its bake-first option never tells you to refrigerate the sides it sets aside. The safe limit at room temperature is 2 hours, so fridge anything you bake early. Always check the turkey with a thermometer.</p>
+  <p class="links"><a href="turkey-timer/index.html">Claude&#x27;s build (untouched)</a></p>
+  <details><summary>The prompt</summary><blockquote>Make me a single index.html (no libraries, no external files, works offline on a phone) that plans Thanksgiving dinner in ONE oven, backwards from the time we eat.
+
+Inputs: turkey weight in lb, stuffed or not, dinner time, how long the turkey rests (default 30 min, never less than 20), and a list of sides, each with a name, oven temperature in °F and minutes (editable, add and remove). Prefill: a 16 lb unstuffed turkey, dinner at 4:00 pm, and these sides: stuffing (in a dish) 350°F 40 min, green bean casserole 350°F 30 min, sweet potatoes 400°F 25 min, rolls 375°F 12 min.
+
+The turkey roasts at 325°F. Take its time from this USDA table, and plan from the long end of the range so it&#x27;s never early:
+
+Weight (lb) | Unstuffed (hours) | Stuffed (hours)
+4 – 8 (breast) | 1½ – 3¼ | –
+6 – 8 (breast) | – | 2½ – 3½
+8 – 12 | 2¾ – 3 | 3 – 3½
+12 – 14 | 3 – 3¾ | 3½ – 4
+14 – 18 | 3¾ – 4¼ | 4 – 4¼
+18 – 20 | 4¼ – 4½ | 4¼ – 4¾
+20 – 24 | 4½ – 5 | 4¾ – 5¼
+
+It&#x27;s done when the innermost thigh and wing and the thickest part of the breast reach 165°F on a food thermometer.
+
+Rules: the oven holds one temperature at a time, and changing temperature takes 10 minutes. Fit the sides into the turkey&#x27;s rest if they can. If they don&#x27;t fit, say plainly what to do instead. Never pretend it fits.
+
+Show: a big readout &quot;turkey in HH:MM · eat HH:MM&quot;, a line &quot;start checking with a thermometer at HH:MM&quot; (the short end of the range), a timeline of the oven, and a step-by-step list with clock times. Make it look good and easy to read on a phone.
+
+Also read #t=&lt;seconds&gt; from the URL and draw that moment of a ~10 s demo tour where the timeline fills in, deterministic for a given t, so I can record it.</blockquote></details>
+  
+</article>
 <article id="sketch-font">
   <a class="shot" href="sketch-font/f1/index.html"><img src="sketch-font/preview.jpg" alt="Photo of handwritten letters → a .ttf you can type with" loading="lazy" width="960" height="600"></a>
   <h2>Photo of handwritten letters → a .ttf you can type with</h2>

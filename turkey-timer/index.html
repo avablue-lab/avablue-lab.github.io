@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#fbf4ea">
+<title>One oven, one dinner: a Thanksgiving planner</title>
+<style>
+:root{
+  --bg:#fbf4ea; --card:#fffaf3; --ink:#2b1d14; --soft:#7a6555; --line:#eadccb;
+  --accent:#b4471f; --ok:#2f7d4f; --bad:#b3261e; --badbg:#fdecea; --warnbg:#fff4dc;
+  --r:16px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-text-size-adjust:100%}
+body.tour *{transition:none!important;animation:none!important}
+main{max-width:1120px;margin:0 auto;padding:16px 14px 48px;
+  padding-left:max(14px,env(safe-area-inset-left));padding-right:max(14px,env(safe-area-inset-right))}
+header h1{font-size:15px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin:4px 0 2px}
+header p{margin:0 0 14px;color:var(--soft);font-size:14px}
+.layout{display:grid;gap:14px;grid-template-columns:1fr;grid-template-areas:"out" "in"}
+.out{grid-area:out;display:grid;gap:14px;min-width:0}
+.inputs{grid-area:in}
+@media(min-width:900px){
+  .layout{grid-template-columns:340px 1fr;grid-template-areas:"in out";align-items:start}
+  .inputs{position:sticky;top:14px}
+}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;
+  box-shadow:0 1px 0 rgba(80,40,10,.04),0 6px 20px -12px rgba(80,40,10,.18)}
+.card h2{font-size:13px;letter-spacing:.07em;text-transform:uppercase;color:var(--soft);margin:0 0 12px;font-weight:700}
+.hero{background:linear-gradient(160deg,#3b2417,#5a2f18 60%,#7a3a17);color:#fff6ea;border-radius:20px;padding:18px 18px 16px;
+  box-shadow:0 10px 30px -14px rgba(90,40,10,.6)}
+.readout{font-size:clamp(28px,8.4vw,54px);font-weight:800;line-height:1.08;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;display:flex;flex-wrap:wrap;gap:0 .35em;align-items:baseline}
+.readout .k{font-weight:500;opacity:.72;font-size:.5em;letter-spacing:0;margin-right:.2em}
+.readout small{font-size:.45em;font-weight:600;margin-left:.12em;opacity:.85}
+.readout .dot{opacity:.5}
+.readout .day{font-size:.32em;font-weight:600;opacity:.8;margin-left:.3em}
+.checkline{margin-top:10px;font-size:clamp(16px,4.4vw,20px);font-weight:600}
+.checkline b{color:#ffd28a;font-variant-numeric:tabular-nums}
+.meta{margin-top:8px;font-size:13.5px;opacity:.78}
+.badge{display:inline-block;margin-top:10px;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:700}
+.badge.bad{background:#ffd9d4;color:#7d1610}
+.badge.ok{background:#d6f2df;color:#17502e}
+.badge.mid{background:#ffe7b3;color:#6b4300}
+.err{font-size:20px;font-weight:700;line-height:1.3}
+
+.notice{border-radius:var(--r);padding:14px 16px;border:1px solid}
+.notice h3{margin:0 0 6px;font-size:18px}
+.notice p{margin:6px 0}
+.notice ul,.notice ol{margin:6px 0 4px;padding-left:20px}
+.notice li{margin:5px 0}
+.notice.bad{background:var(--badbg);border-color:#f2b8b2;color:#4a0f0b}
+.notice.bad h3{color:var(--bad)}
+.notice.ok{background:#eaf7ee;border-color:#b9e2c6;color:#123d24}
+.notice.mid{background:var(--warnbg);border-color:#f1d38f;color:#4a3000}
+.notice button{margin-top:6px}
+
+.tl{font-size:12px;user-select:none}
+.row{display:grid;grid-template-columns:86px 1fr;align-items:center;gap:8px;margin:5px 0}
+.lab{font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+.track{position:relative;height:28px;background:#f3e8da;border-radius:8px;overflow:hidden}
+.ticks .track{background:none;height:18px;overflow:visible}
+.tick{position:absolute;top:0;transform:translateX(-50%);color:var(--soft);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tick.first{transform:none}
+.tick.last{transform:translateX(-100%)}
+.grid{position:absolute;top:0;bottom:0;width:1px;background:rgba(120,90,60,.13)}
+.seg{position:absolute;top:3px;bottom:3px;border-radius:6px;color:#fff;font-weight:700;font-size:11.5px;
+  display:flex;align-items:center;padding:0 6px;overflow:hidden;white-space:nowrap}
+.seg span{overflow:hidden;text-overflow:ellipsis}
+.seg.heat{background:repeating-linear-gradient(135deg,#9c8877 0 5px,#b9a797 5px 10px);color:#fff}
+.seg.idle{background:#e9c98f;color:#6b4a14}
+.seg.check{background:repeating-linear-gradient(135deg,rgba(255,255,255,.0) 0 5px,rgba(255,255,255,.38) 5px 9px);top:3px;bottom:3px;border-radius:0 6px 6px 0}
+.seg.rest{background:#d8c3a8;color:#4a3420}
+.seg.eat{background:var(--ok)}
+.nofit{position:absolute;inset:3px;border:2px dashed #e0958d;border-radius:6px;color:var(--bad);font-weight:700;font-size:11.5px;
+  display:flex;align-items:center;padding:0 8px;white-space:nowrap;overflow:hidden}
+.earlier{position:absolute;inset:3px;border:2px dashed #e5c37b;border-radius:6px;color:#7a5200;font-weight:600;font-size:11.5px;
+  display:flex;align-items:center;padding:0 8px;white-space:nowrap;overflow:hidden}
+.mask{position:absolute;top:0;bottom:0;right:0;left:100%;background:#f3e8da;z-index:3}
+.ticks .mask{display:none}
+.ph{position:absolute;top:0;bottom:0;width:2px;background:var(--accent);z-index:4;display:none}
+.ph[data-label]::after{content:attr(data-label);position:absolute;top:-1px;left:4px;background:var(--accent);color:#fff;
+  font-size:10.5px;font-weight:700;padding:1px 5px;border-radius:5px;white-space:nowrap}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0 0;color:var(--soft);font-size:12px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:3px;vertical-align:-1px;margin-right:5px}
+.foot{color:var(--soft);font-size:12.5px;margin:10px 0 0}
+
+.steps{list-style:none;margin:0;padding:0}
+.steps li{display:grid;grid-template-columns:78px 1fr;gap:10px;padding:10px 0;border-top:1px solid var(--line);align-items:start}
+.steps li:first-child{border-top:0}
+.steps time{font-weight:800;font-variant-numeric:tabular-nums;font-size:15px;color:var(--ink)}
+.steps time small{font-weight:600;font-size:11px;color:var(--soft);margin-left:2px}
+.steps time em{display:block;font-style:normal;font-weight:600;font-size:10.5px;color:var(--bad)}
+.steps li div{font-size:15px}
+.steps li.turkey time,.steps li.eat time{color:var(--accent)}
+.steps li.eat div{font-weight:800}
+.steps li.check div{font-weight:600}
+.steps li.now{background:linear-gradient(90deg,#fff0d6,rgba(255,240,214,0));border-radius:8px}
+.steps .why{display:block;color:var(--soft);font-size:13px;margin-top:2px}
+.tchip{display:inline-block;padding:0 6px;border-radius:6px;color:#fff;font-weight:700;font-size:12.5px}
+
+label{display:block;font-weight:600;font-size:13.5px;margin:0 0 12px}
+label small{display:block;font-weight:400;color:var(--soft);margin-top:3px}
+input[type=number],input[type=time],input[type=text]{width:100%;font:inherit;font-size:16px;padding:10px 11px;border:1px solid #dccab4;
+  border-radius:10px;background:#fff;color:var(--ink);margin-top:5px;min-width:0}
+input:focus{outline:2px solid #e9a073;outline-offset:0;border-color:#e9a073}
+.unit-in{position:relative;display:block}
+.unit-in em{position:absolute;right:11px;top:50%;transform:translateY(-35%);font-style:normal;color:var(--soft);font-weight:500;pointer-events:none}
+.unit-in input{padding-right:40px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.toggle{display:grid;grid-template-columns:1fr 1fr;background:#f1e4d3;border-radius:12px;padding:3px;margin:0 0 12px}
+.toggle button{font:inherit;font-weight:700;font-size:14.5px;border:0;background:none;padding:9px;border-radius:9px;color:var(--soft);cursor:pointer}
+.toggle button.on{background:#fff;color:var(--ink);box-shadow:0 1px 4px rgba(80,40,10,.15)}
+.inputs h3{font-size:13px;letter-spacing:.07em;text-transform:uppercase;color:var(--soft);margin:16px 0 6px}
+.side-head,.side{display:grid;grid-template-columns:1fr 66px 58px 34px;gap:6px;align-items:center}
+.side-head{font-size:11.5px;color:var(--soft);font-weight:600;padding:0 2px}
+.side{margin:6px 0}
+.side input{margin-top:0;padding:9px 8px}
+.side .x{border:0;background:#f1e4d3;color:var(--soft);font-size:18px;line-height:1;height:38px;border-radius:9px;cursor:pointer}
+button.ghost{font:inherit;font-weight:700;border:1.5px dashed #d3b896;background:none;color:var(--accent);width:100%;padding:10px;border-radius:10px;margin:6px 0 12px;cursor:pointer}
+button.act{font:inherit;font-weight:700;font-size:14px;border:0;background:var(--accent);color:#fff;padding:8px 12px;border-radius:9px;cursor:pointer}
+button.act.alt{background:#fff;color:var(--accent);border:1.5px solid var(--accent)}
+button.link{font:inherit;border:0;background:none;color:var(--soft);text-decoration:underline;padding:4px 0;cursor:pointer;font-size:13px}
+.check{display:flex;gap:10px;align-items:flex-start;font-weight:500}
+.check input{width:20px;height:20px;margin:1px 0 0;flex:none;accent-color:var(--accent)}
+.hint{color:var(--bad);font-size:12.5px;font-weight:600;margin:-6px 0 10px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>One oven · one dinner</h1>
+    <p>Thanksgiving, planned backwards from the time you eat.</p>
+  </header>
+  <div class="layout">
+    <div class="out">
+      <section class="hero" id="hero">
+        <div class="readout" id="readout"></div>
+        <div class="checkline" id="checkline"></div>
+        <div class="meta" id="meta"></div>
+        <div id="badge"></div>
+      </section>
+      <div id="notice"></div>
+      <section class="card" id="card1"><h2>The oven, all day</h2><div class="tl" id="tl1"></div></section>
+      <section class="card" id="card2"><h2>Zoom: the turkey's rest</h2><div class="tl" id="tl2"></div><div class="legend" id="legend"></div>
+        <p class="foot">Dishes at the same temperature bake together, so they need room on the racks at the same time.</p></section>
+      <section class="card" id="card3"><h2>Step by step</h2><ol class="steps" id="steps"></ol></section>
+    </div>
+
+    <section class="card inputs" id="inputs">
+      <h2>Your dinner</h2>
+      <div class="grid2">
+        <label>Turkey weight<span class="unit-in"><input id="w" type="number" inputmode="decimal" min="1" step="0.5"><em>lb</em></span></label>
+        <label>Dinner time<input id="eat" type="time"></label>
+      </div>
+      <div class="toggle" role="group" aria-label="Stuffed or not">
+        <button type="button" data-s="0">Unstuffed</button><button type="button" data-s="1">Stuffed</button>
+      </div>
+      <label>Rest after roasting<span class="unit-in"><input id="rest" type="number" inputmode="numeric" min="20" step="5"><em>min</em></span>
+        <small>Never less than 20 min.</small></label>
+      <div class="hint" id="resthint"></div>
+      <h3>Sides</h3>
+      <div class="side-head"><span>Name</span><span>°F</span><span>min</span><span></span></div>
+      <div id="sides"></div>
+      <div class="hint" id="sidehint"></div>
+      <button type="button" class="ghost" id="add">+ Add a side</button>
+      <label class="check"><input type="checkbox" id="before"><span>Bake sides that don't fit in the rest <b>before</b> the turkey goes in (they'll need reheating)</span></label>
+      <button type="button" class="link" id="reset">Reset to the example</button>
+    </section>
+  </div>
+</main>
+
+<script>
+(function(){
+"use strict";
+var TURKEY_T = 325, CHANGE = 10;
+var PREFILL = {weight:16, stuffed:false, eat:"16:00", rest:30, before:false, sides:[
+  {name:"Stuffing (in a dish)", temp:350, min:40},
+  {name:"Green bean casserole", temp:350, min:30},
+  {name:"Sweet potatoes", temp:400, min:25},
+  {name:"Rolls", temp:375, min:12}
+]};
+// USDA roasting chart, 325°F, minutes [short, long]
+var TABLE = [
+  {lo:4,  hi:8,  u:[90,195],  s:null,      breast:true},
+  {lo:6,  hi:8,  u:null,      s:[150,210], breast:true},
+  {lo:8,  hi:12, u:[165,180], s:[180,210]},
+  {lo:12, hi:14, u:[180,225], s:[210,240]},
+  {lo:14, hi:18, u:[225,255], s:[240,255]},
+  {lo:18, hi:20, u:[255,270], s:[255,285]},
+  {lo:20, hi:24, u:[270,300], s:[285,315]}
+];
+function clone(o){return JSON.parse(JSON.stringify(o));}
+var state = clone(PREFILL);
+
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function pad(n){return (n<10?"0":"")+n;}
+function parseTime(v){var m=/^(\d{1,2}):(\d{2})/.exec(v||"");return m?(+m[1])*60+(+m[2]):16*60;}
+function parts(m){
+  var d=Math.floor(m/1440), mm=m-d*1440, h24=Math.floor(mm/60), mi=mm%60;
+  return {hm:(h24%12||12)+":"+pad(mi), ap:h24<12?"am":"pm", day:d<0?"day before":d>0?"next day":""};
+}
+function clock(m){var p=parts(m);return p.hm+" "+p.ap+(p.day?" ("+p.day+")":"");}
+function clockH(m){var p=parts(m);return p.hm+"<small>"+p.ap+"</small>"+(p.day?"<span class='day'>"+p.day+"</span>":"");}
+function hrs(m){var h=Math.floor(m/60),r=m%60;return (h||"")+({0:"",15:"¼",30:"½",45:"¾"}[r]||(":"+pad(r)));}
+function dur(m){var h=Math.floor(m/60),r=m%60;return (h?h+" h":"")+(h&&r?" ":"")+(r||!h?r+" min":"");}
+function tcolor(t){var h=Math.max(0,Math.min(50,42-(t-325)*0.5));var l=t<325?44:48;return "hsl("+h.toFixed(0)+" 72% "+l+"%)";}
+function chip(t){return "<span class='tchip' style='background:"+tcolor(t)+"'>"+t+"°F</span>";}
+
+function turkeyTime(w,stuffed){
+  if(!(w>0)) return {error:"Enter the turkey's weight in pounds."};
+  var lo=Infinity, hi=-Infinity, breast=false, hit=false;
+  TABLE.forEach(function(r){
+    var c=stuffed?r.s:r.u; if(!c) return;
+    if(w>=r.lo && w<=r.hi){hit=true; lo=Math.min(lo,c[0]); hi=Math.max(hi,c[1]); if(r.breast) breast=true;}
+  });
+  if(!hit) return {error:"The USDA table covers "+(stuffed?"6":"4")+"–24 lb "+(stuffed?"stuffed":"unstuffed")+". A "+w+" lb turkey is outside it, so this planner won't guess a time."};
+  return {short:lo, long:hi, breast:breast && w<8};
+}
+function groupsOf(list){
+  var g={}, out=[];
+  list.forEach(function(d){ if(!g[d.temp]){g[d.temp]={temp:d.temp,block:0,dishes:[]};out.push(g[d.temp]);} g[d.temp].block=Math.max(g[d.temp].block,d.min); g[d.temp].dishes.push(d); });
+  return out;
+}
+function costOf(list){ return groupsOf(list).reduce(function(c,g){return c+g.block+(g.temp!==TURKEY_T?CHANGE:0);},0); }
+function bestFit(list,rest){
+  var n=list.length, best=null;
+  function better(a,b){for(var i=0;i<a.length;i++){if(a[i]!==b[i])return a[i]>b[i];}return false;}
+  if(n<=14){
+    for(var m=0;m<(1<<n);m++){
+      var sub=[]; for(var i=0;i<n;i++) if(m>>i&1) sub.push(list[i]);
+      var c=costOf(sub); if(c>rest) continue;
+      var tot=sub.reduce(function(s,d){return s+d.min;},0), sc=[sub.length,tot,-c];
+      if(!best||better(sc,best.sc)) best={sub:sub,sc:sc};
+    }
+    return best.sub;
+  }
+  var sorted=list.slice().sort(function(a,b){return a.min-b.min;}), pick=[];
+  sorted.forEach(function(d){ if(costOf(pick.concat([d]))<=rest) pick.push(d); });
+  return pick;
+}
+function orderRest(groups){ // 325 first (no change), then longest first so the shortest bake comes out hot at the end
+  return groups.slice().sort(function(a,b){ if((a.temp===TURKEY_T)!==(b.temp===TURKEY_T)) return a.temp===TURKEY_T?-1:1; return b.block-a.block||a.temp-b.temp; });
+}
+function orderBefore(groups){ // 325 last (no change into the turkey)
+  return groups.slice().sort(function(a,b){ if((a.temp===TURKEY_T)!==(b.temp===TURKEY_T)) return a.temp===TURKEY_T?1:-1; return b.block-a.block||a.temp-b.temp; });
+}
+function beforeCost(groups){
+  var g=orderBefore(groups), c=0, cur=null;
+  g.forEach(function(x){ if(x.temp!==cur){c+=CHANGE;cur=x.temp;} c+=x.block; });
+  if(cur!==TURKEY_T) c+=CHANGE;
+  return c;
+}
+
+function plan(s){
+  var tt=turkeyTime(+s.weight, s.stuffed); if(tt.error) return {error:tt.error};
+  var eat=parseTime(s.eat), restIn=+s.rest, restNote="";
+  if(!(restIn>0)){restIn=30;restNote="No rest given, so this uses the default 30 min.";}
+  var rest=Math.max(20,Math.round(restIn)); if(restIn<20) restNote="The rest can't be under 20 min, so this plans 20.";
+  var out=eat-rest, tin=out-tt.long, check=tin+tt.short;
+  var sides=[], bad=[];
+  s.sides.forEach(function(d,i){
+    var t=Math.round(+d.temp), m=Math.round(+d.min), nm=(d.name||"").trim()||("Side "+(i+1));
+    if(t>=150&&t<=550&&m>0&&m<=600) sides.push({name:nm,temp:t,min:m,i:i}); else bad.push(nm);
+  });
+  var fit=bestFit(sides,rest), left=sides.filter(function(d){return fit.indexOf(d)<0;});
+  var needAll=costOf(sides), leftGroups=groupsOf(left), bCost=left.length?beforeCost(leftGroups):0;
+
+  var oven=[], ev=[], bars={}, seq=0;
+  function add(t,kind,html){ev.push({t:t,kind:kind,html:html,seq:seq++});}
+  function walk(groups,start,cur,tag){
+    var c=start;
+    groups.forEach(function(g){
+      if(g.temp!==cur){
+        oven.push({a:c,b:c+CHANGE,kind:"heat",temp:g.temp});
+        add(c,"oven", cur==null ? "Turn the oven on to "+chip(g.temp)+". Allow 10 min to heat."
+          : "Set the oven to "+chip(g.temp)+". Allow 10 min to "+(g.temp>cur?"heat up":"cool down")+".");
+        c+=CHANGE; cur=g.temp;
+      }
+      var end=c+g.block; oven.push({a:c,b:end,kind:"bake",temp:g.temp,label:g.temp+"°F"});
+      g.dishes.slice().sort(function(a,b){return b.min-a.min;}).forEach(function(d){
+        bars[d.i]={a:end-d.min,b:end,temp:g.temp,tag:tag};
+        add(end-d.min,"in","<b>"+esc(d.name)+"</b> in · "+g.temp+"°F for "+d.min+" min");
+      });
+      add(end,"out","Out: <b>"+g.dishes.map(function(d){return esc(d.name);}).join(", ")+"</b>"+(tag==="before"?"<span class='why'>Set aside. They'll need reheating before dinner.</span>":""));
+      c=end;
+    });
+    return {c:c,cur:cur};
+  }
+  var useBefore=s.before && left.length>0, first;
+  if(useBefore){
+    first=tin-bCost;
+    var r=walk(orderBefore(leftGroups),first,null,"before");
+    if(r.cur!==TURKEY_T){ oven.push({a:r.c,b:r.c+CHANGE,kind:"heat",temp:TURKEY_T}); add(r.c,"oven","Set the oven to "+chip(TURKEY_T)+" for the turkey. Allow 10 min to cool down."); }
+  } else {
+    first=tin-CHANGE;
+    oven.push({a:first,b:tin,kind:"heat",temp:TURKEY_T});
+    add(first,"oven","Turn the oven on to "+chip(TURKEY_T)+". Allow 10 min to heat.");
+  }
+  oven.push({a:tin,b:out,kind:"bake",temp:TURKEY_T,label:"Turkey · 325°F",turkey:true});
+  add(tin,"turkey","<b>Turkey in</b> at 325°F. "+(+s.weight)+" lb, "+(s.stuffed?"stuffed":"unstuffed")+": planned "+dur(tt.long)+
+    "<span class='why'>USDA range "+hrs(tt.short)+"–"+hrs(tt.long)+" h. This plans the long end so it's never early.</span>");
+  add(check,"check","<b>Start checking with a thermometer.</b><span class='why'>Innermost thigh, innermost wing and the thickest part of the breast. It's done when all three read 165°F"+(s.stuffed?", and the center of the stuffing reads 165°F too":"")+".</span>");
+  add(out,"turkey","<b>Turkey out</b> (165°F everywhere). Tent with foil, rest "+rest+" min."+
+    "<span class='why'>At 165°F early? Take it out then; it just rests longer. Not at 165°F yet? Keep roasting, check every 10–15 min, and everything below moves later by the same amount.</span>");
+  var rc=costOf(fit), sStart=eat-rc;
+  if(sStart>out) oven.push({a:out,b:sStart,kind:"idle",temp:TURKEY_T,label:"325°F"});
+  walk(orderRest(groupsOf(fit)),sStart,TURKEY_T,"rest");
+  add(eat,"eat","Carve and eat.");
+  ev.sort(function(a,b){return a.t-b.t||a.seq-b.seq;});
+  return {tt:tt,eat:eat,rest:rest,restNote:restNote,out:out,tin:tin,check:check,first:first,sides:sides,bad:bad,
+    fit:fit,left:left,needAll:needAll,bCost:bCost,useBefore:useBefore,oven:oven,ev:ev,bars:bars,slack:rest-rc,s:s};
+}
+
+/* ---------- rendering ---------- */
+function tick(m,zoom){var p=parts(m);var h=p.hm.split(":");return zoom?p.hm:(h[1]==="00"?h[0]:p.hm)+p.ap.charAt(0);}
+function tl(P,a,b,zoom){
+  var span=b-a;
+  function pct(x){return (Math.min(Math.max(x,a),b)-a)/span*100;}
+  function seg(s,e,cls,style,label){
+    if(e<=a||s>=b) return "";
+    var l=pct(s),w=pct(e)-l;
+    return "<div class='seg "+cls+"' style='left:"+l.toFixed(3)+"%;width:"+w.toFixed(3)+"%;"+(style||"")+"' title='"+esc(label||"")+"'><span>"+esc(label||"")+"</span></div>";
+  }
+  var step=zoom?15:(span>600?120:60), ticks="", grid="";
+  for(var t=Math.ceil(a/step)*step;t<=b;t+=step){
+    var p=pct(t), cls=p<4?" first":p>96?" last":"";
+    ticks+="<span class='tick"+cls+"' style='left:"+p+"%'>"+tick(t,zoom)+"</span>"; grid+="<div class='grid' style='left:"+p+"%'></div>";
+  }
+  function row(label,inner,first){return "<div class='row'><div class='lab' title='"+esc(label)+"'>"+esc(label)+"</div><div class='track'>"+grid+inner+"<div class='mask'></div><div class='ph'"+(first?" data-first='1'":"")+"></div></div></div>";}
+  var h="<div class='row ticks'><div class='lab'></div><div class='track'>"+ticks+"</div></div>";
+  var o="";
+  P.oven.forEach(function(sg){
+    var lab=sg.kind==="heat"?"→"+sg.temp+"°":zoom&&sg.turkey?"325°F":sg.label;
+    o+=seg(sg.a,sg.b,sg.kind,sg.kind==="heat"?"":"background:"+(sg.kind==="idle"?"":tcolor(sg.temp)),lab);
+  });
+  h+=row("Oven",o,true);
+  var tk=seg(P.tin,P.out,"","background:"+tcolor(TURKEY_T),zoom?"Roasting":"Roasting "+dur(P.tt.long))+
+    seg(P.check,P.out,"check","",zoom?"":"check")+seg(P.out,P.eat,"rest","","Rest "+P.rest+"m");
+  h+=row("Turkey",tk);
+  if(zoom){
+    P.sides.forEach(function(d){
+      var bar=P.bars[d.i], inner;
+      if(bar&&bar.tag==="rest") inner=seg(bar.a,bar.b,"","background:"+tcolor(bar.temp),d.temp+"° · "+d.min+"m");
+      else if(bar) inner="<div class='earlier'>baked before the turkey, out "+esc(clock(bar.b))+"</div>";
+      else inner="<div class='nofit'>doesn't fit in the rest</div>";
+      h+=row(d.name,inner);
+    });
+    h+=row("Dinner",seg(P.eat-Math.min(4,span*0.03),P.eat,"eat","",""));
+  }
+  return h;
+}
+function legend(P){
+  var temps=[]; P.oven.forEach(function(s){if(s.kind==="bake"&&temps.indexOf(s.temp)<0)temps.push(s.temp);});
+  temps.sort(function(a,b){return a-b;});
+  return temps.map(function(t){return "<span><i style='background:"+tcolor(t)+"'></i>"+t+"°F</span>";}).join("")+
+    "<span><i style='background:repeating-linear-gradient(135deg,#9c8877 0 3px,#b9a797 3px 6px)'></i>changing temp (10 min)</span>"+
+    "<span><i style='background:#d8c3a8'></i>turkey resting</span>";
+}
+function notice(P){
+  var s=P.s, h="";
+  if(P.bad.length) h+="";
+  if(!P.sides.length) return "<div class='notice ok'><h3>No sides in the oven</h3><p>The oven is free for the whole "+P.rest+"-min rest.</p></div>";
+  if(!P.left.length){
+    return "<div class='notice ok'><h3>Every side fits in the "+P.rest+"-min rest</h3><p>Temperature changes and baking take "+(P.rest-P.slack)+" min"+
+      (P.slack>0?", so the oven sits at 325°F for the first "+P.slack+" min after the turkey comes out":"")+". The last dish comes out right at dinner.</p></div>";
+  }
+  var names=P.left.map(function(d){return "<b>"+esc(d.name)+"</b>";}).join(", ");
+  if(P.useBefore){
+    var lastOut=P.tin-(P.oven.length? (orderBefore(groupsOf(P.left)).slice(-1)[0].temp!==TURKEY_T?CHANGE:0):0);
+    return "<div class='notice mid'><h3>Baked before the turkey: "+names+"</h3><p>They don't fit in the "+P.rest+"-min rest, so they bake in the morning. The oven goes on at <b>"+clock(P.first)+
+      "</b> and they're out by <b>"+clock(lastOut)+"</b>, "+dur(P.eat-lastOut)+" before dinner. They'll be cold by then and need reheating, and the oven stays busy with the turkey until "+clock(P.out)+
+      ".</p><button type='button' class='act alt' data-do='undo'>Undo: keep them off the plan</button></div>";
+  }
+  var lis=P.left.map(function(d){
+    var c=d.temp!==TURKEY_T?CHANGE:0;
+    return "<li><b>"+esc(d.name)+"</b>: "+(c?"10 min to reach "+d.temp+"°F + ":"")+d.min+" min = "+(c+d.min)+" min"+(c+d.min>P.rest?", longer than the whole rest":"")+"</li>";
+  }).join("");
+  var fitTxt=P.fit.length?"What does fit: "+P.fit.map(function(d){return esc(d.name);}).join(", ")+".":"Nothing fits on its own.";
+  var nTemps=groupsOf(P.sides).filter(function(g){return g.temp!==TURKEY_T;}).length;
+  var bakeMin=P.needAll-nTemps*CHANGE;
+  var need=Math.max(20,P.needAll), tin2=P.eat-need-P.tt.long;
+  return "<div class='notice bad'><h3>Not everything fits in a "+P.rest+"-min rest</h3>"+
+    "<p>The oven is at 325°F when the turkey comes out, and dinner is "+P.rest+" min later. These are left off the plan:</p><ul>"+lis+"</ul><p>"+fitTxt+
+    " All sides together need <b>"+P.needAll+" min</b>: "+nTemps+" temperature change"+(nTemps===1?"":"s")+" ("+nTemps*CHANGE+" min) + "+bakeMin+" min of baking.</p>"+
+    "<p><b>What to do instead</b> (pick one):</p><ol>"+
+    "<li><b>Rest the turkey "+need+" min.</b> Turkey in at "+clock(tin2)+". That's "+dur(need)+" out of the oven, so it will be warm, not hot; keep it tented with foil.<br><button type='button' class='act' data-do='rest' data-v='"+need+"'>Use a "+need+"-min rest</button></li>"+
+    "<li><b>Bake "+(P.left.length>1?"them":"it")+" before the turkey goes in.</b> Oven on at "+clock(P.tin-P.bCost)+", done before "+clock(P.tin)+". "+(P.left.length>1?"They":"It")+" will need reheating.<br><button type='button' class='act' data-do='before'>Bake "+(P.left.length>1?"them":"it")+" first</button></li>"+
+    "<li>Or take one off the oven (stovetop, microwave, slow cooker), or bake it at a temperature you already use if its recipe allows. Each temperature you drop saves 10 min.</li></ol></div>";
+}
+function render(){
+  var T=tourT(), s=T===null?state:clone(PREFILL), P=plan(s);
+  document.body.classList.toggle("tour",T!==null);
+  $("resthint").textContent=P.restNote||"";
+  $("sidehint").textContent=P.bad&&P.bad.length?"Skipped (check °F and minutes): "+P.bad.join(", "):"";
+  ["card1","card2","card3"].forEach(function(id){$(id).style.display=P.error?"none":"";});
+  if(P.error){
+    $("readout").innerHTML="<div class='err'>"+esc(P.error)+"</div>"; $("checkline").textContent=""; $("meta").textContent=""; $("badge").innerHTML=""; $("notice").innerHTML="";
+    return;
+  }
+  $("readout").innerHTML="<span><span class='k'>turkey in</span>"+clockH(P.tin)+"</span><span class='dot'>·</span><span><span class='k'>eat</span>"+clockH(P.eat)+"</span>";
+  $("checkline").innerHTML="Start checking with a thermometer at <b>"+clock(P.check)+"</b>";
+  $("meta").innerHTML=esc(+s.weight)+" lb "+(s.stuffed?"stuffed":"unstuffed")+" · 325°F · planned "+dur(P.tt.long)+" (USDA "+hrs(P.tt.short)+"–"+hrs(P.tt.long)+" h) · rest "+P.rest+" min"+
+    (P.useBefore?" · oven on "+clock(P.first):"")+(P.tt.breast?"<br>Under 8 lb, the USDA rows are for a turkey breast.":"")+
+    "<br>Done at 165°F: innermost thigh, innermost wing, thickest part of the breast"+(s.stuffed?", center of the stuffing":"")+".";
+  var nl=P.left.length;
+  $("badge").innerHTML=!P.sides.length?"":nl===0?"<span class='badge ok'>All "+P.sides.length+" sides fit in the rest</span>":
+    P.useBefore?"<span class='badge mid'>"+nl+" side"+(nl>1?"s":"")+" baked before the turkey</span>":"<span class='badge bad'>"+nl+" of "+P.sides.length+" sides don't fit · see below</span>";
+  $("notice").innerHTML=notice(P);
+  var zs=P.out-15;
+  $("tl1").innerHTML=tl(P,P.first,P.eat,false);
+  $("tl2").innerHTML=tl(P,zs,P.eat,true);
+  $("legend").innerHTML=legend(P);
+  $("steps").innerHTML=P.ev.map(function(e){
+    var p=parts(e.t);
+    return "<li class='"+e.kind+"' data-t='"+e.t+"'><time>"+p.hm+"<small>"+p.ap+"</small>"+(p.day?"<em>"+p.day+"</em>":"")+"</time><div>"+e.html+"</div></li>";
+  }).join("");
+  if(T!==null) tour(P,T,zs);
+}
+
+/* ---------- deterministic demo tour: #t=<seconds>, ~10 s ---------- */
+function tourT(){var m=/(?:^#|[#&])t=([0-9]*\.?[0-9]+)/.exec(location.hash||"");return m?Math.max(0,parseFloat(m[1])):null;}
+function ease(x){x=Math.max(0,Math.min(1,x));return x*x*(3-2*x);}
+function tour(P,t,zs){
+  var start=P.first, eat=P.eat, clk;
+  if(t<0.8) clk=-Infinity;
+  else if(t<4.8) clk=start+(zs-start)*ease((t-0.8)/4);
+  else if(t<8.6) clk=zs+(eat-zs)*ease((t-4.8)/3.8);
+  else clk=eat;
+  $("hero").style.opacity=Math.min(1,t/0.6);
+  var r1=clk===-Infinity?0:(clk-start)/(eat-start), r2=clk===-Infinity?0:(clk-zs)/(eat-zs);
+  function apply(id,r){
+    r=Math.max(0,Math.min(1,r));
+    var tracks=$(id).querySelectorAll(".row:not(.ticks) .track");
+    for(var i=0;i<tracks.length;i++){
+      var mk=tracks[i].querySelector(".mask"), ph=tracks[i].querySelector(".ph");
+      mk.style.left=(r*100)+"%";
+      ph.style.display=r>0&&r<1?"block":"none"; ph.style.left="calc("+(r*100)+"% - 1px)";
+      if(ph.getAttribute("data-first")&&r>0&&r<1){ph.setAttribute("data-label",clock(Math.round(clk)));} else ph.removeAttribute("data-label");
+      if(r>0.8) ph.style.transform="translateX(0)";
+    }
+    // keep the playhead label inside the card near the right edge
+    var f=$(id).querySelector(".ph[data-label]"); if(f&&r>0.78){f.style.setProperty("--x","0");f.classList.add("flip");}
+  }
+  apply("tl1",r1); apply("tl2",r2);
+  var lis=$("steps").querySelectorAll("li"), lastOn=null;
+  for(var i=0;i<lis.length;i++){
+    var on=+lis[i].getAttribute("data-t")<=clk+0.001;
+    lis[i].style.opacity=on?1:0; lis[i].classList.remove("now"); if(on) lastOn=lis[i];
+  }
+  if(lastOn&&t<9.6) lastOn.classList.add("now");
+  $("notice").style.opacity=t<8.8?0:Math.min(1,(t-8.8)/0.6);
+  $("badge").style.opacity=t<8.8?0:Math.min(1,(t-8.8)/0.6);
+}
+
+/* ---------- inputs ---------- */
+function sideRows(){
+  $("sides").innerHTML=state.sides.map(function(d,i){
+    return "<div class='side' data-i='"+i+"'><input type='text' data-k='name' value='"+esc(d.name)+"' aria-label='Side name' placeholder='Side'>"+
+      "<input type='number' inputmode='numeric' data-k='temp' value='"+esc(d.temp)+"' aria-label='Oven °F' step='5'>"+
+      "<input type='number' inputmode='numeric' data-k='min' value='"+esc(d.min)+"' aria-label='Minutes' min='1'>"+
+      "<button type='button' class='x' data-rm='"+i+"' aria-label='Remove "+esc(d.name)+"'>×</button></div>";
+  }).join("");
+}
+function syncInputs(){
+  $("w").value=state.weight; $("eat").value=state.eat; $("rest").value=state.rest; $("before").checked=!!state.before;
+  var b=document.querySelectorAll(".toggle button"); for(var i=0;i<b.length;i++) b[i].classList.toggle("on",(b[i].getAttribute("data-s")==="1")===state.stuffed);
+  sideRows();
+}
+$("w").addEventListener("input",function(){state.weight=this.value;render();});
+$("eat").addEventListener("input",function(){if(this.value){state.eat=this.value;render();}});
+$("rest").addEventListener("input",function(){state.rest=this.value;render();});
+$("rest").addEventListener("change",function(){var v=+this.value;if(!(v>0)){state.rest=30;}else if(v<20){state.rest=20;} this.value=state.rest;render();});
+$("before").addEventListener("change",function(){state.before=this.checked;render();});
+document.querySelector(".toggle").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;state.stuffed=b.getAttribute("data-s")==="1";syncInputs();render();});
+$("sides").addEventListener("input",function(e){var r=e.target.closest(".side");if(!r)return;state.sides[+r.getAttribute("data-i")][e.target.getAttribute("data-k")]=e.target.value;render();});
+$("sides").addEventListener("click",function(e){var b=e.target.closest("[data-rm]");if(!b)return;state.sides.splice(+b.getAttribute("data-rm"),1);sideRows();render();});
+$("add").addEventListener("click",function(){state.sides.push({name:"",temp:350,min:30});sideRows();render();var ins=$("sides").querySelectorAll("input[data-k=name]");if(ins.length)ins[ins.length-1].focus();});
+$("reset").addEventListener("click",function(){state=clone(PREFILL);syncInputs();render();});
+$("notice").addEventListener("click",function(e){
+  var b=e.target.closest("[data-do]"); if(!b||tourT()!==null) return;
+  var a=b.getAttribute("data-do");
+  if(a==="rest"){state.rest=+b.getAttribute("data-v");state.before=false;}
+  if(a==="before") state.before=true;
+  if(a==="undo") state.before=false;
+  syncInputs(); render();
+});
+window.addEventListener("hashchange",render);
+syncInputs(); render();
+})();
+</script>
+</body>
+</html>
