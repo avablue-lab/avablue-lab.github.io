@@ -36,11 +36,11 @@ Before you finish, look at your game: render frames of the demo with `python3 -I
   
 </article>
 <article id="app-at-1000-users">
-  <a class="shot" href="app-at-1000-users/b2/index.html"><img src="app-at-1000-users/preview.jpg" alt="1,000 people open an app at once" loading="lazy" width="960" height="600"></a>
+  <a class="shot" href="app-at-1000-users/b2-fix/index.html"><img src="app-at-1000-users/preview.jpg" alt="1,000 people open an app at once" loading="lazy" width="960" height="600"></a>
   <h2>1,000 people open an app at once</h2>
   <p class="meta">2026-11-25 · Claude Opus 5.5</p>
-  <p>One server, one Postgres, 1,000 people at once. Drag the crowd and the query time, and flip on &quot;people hit refresh&quot; to watch the line stay jammed after the crowd leaves. Same prompt, three builds.</p>
-  <p class="links"><a href="app-at-1000-users/b2/index.html">Version 2 (1 s queries)</a> · <a href="app-at-1000-users/b1/index.html">Version 1</a> · <a href="app-at-1000-users/b3/index.html">Version 3</a></p>
+  <p>One server, one Postgres, 1,000 people at once. Flip on &quot;people hit refresh&quot; and the line stays jammed after the crowd leaves: each refresh leaves the old request in line. Then flip on the fix Claude added, &quot;drop requests that waited more than 5 s&quot;, and it clears in about 4 s instead of 10.</p>
+  <p class="links"><a href="app-at-1000-users/b2-fix/index.html">Version 2 + the fix switch (Claude&#x27;s follow-up)</a> · <a href="app-at-1000-users/b2/index.html">Version 2 (untouched)</a> · <a href="app-at-1000-users/b1/index.html">Version 1</a> · <a href="app-at-1000-users/b3/index.html">Version 3</a></p>
   <details><summary>The prompt</summary><blockquote>I vibe-coded a web app. It runs on one server, and every page load makes one query to one Postgres database with default settings. Build me a single index.html that shows what happens when 1,000 people open it at once. No libraries and no external files: canvas 2D or SVG only.
 
 Give me a slider for how many people are on the site, a slider for how long one database query takes, and a switch for &quot;people hit refresh when the page takes more than 5 seconds&quot;. Show the requests queueing, the database&#x27;s connections filling up, and how long a person waits for the page, with the numbers on screen big enough to read on a phone.

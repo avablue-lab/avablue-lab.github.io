@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>What happens when 1,000 people open my app</title>
+<style>
+  html,body{margin:0;background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  #wrap{max-width:min(100vw,calc(92vh * 0.8));margin:0 auto;padding:8px}
+  canvas{display:block;width:100%;height:auto;border-radius:12px}
+  #ui{margin:12px 4px 24px;display:grid;gap:14px;font-size:16px}
+  .row{display:flex;gap:8px}
+  button{flex:1;font-size:16px;padding:10px;border-radius:8px;border:1px solid #30363d;background:#161b22;color:#e6edf3;cursor:pointer}
+  button.on{background:#1f6feb;border-color:#1f6feb}
+  label{display:grid;gap:6px}
+  label b{color:#f5b83d}
+  input[type=range]{width:100%}
+  .sw{display:flex;align-items:center;gap:10px}
+  .sw input{width:22px;height:22px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="1080" height="1350"></canvas>
+  <div id="ui">
+    <div class="row"><button id="bTour">Auto tour</button><button id="bMan">Manual</button></div>
+    <label>People on the site: <b id="vP"></b><input type="range" id="sP" min="0" max="2000" step="10" value="1000"></label>
+    <label>One database query takes: <b id="vQ"></b><input type="range" id="sQ" min="10" max="3000" step="10" value="1000"></label>
+    <label class="sw"><input type="checkbox" id="cR" checked> People hit refresh when the page takes more than 5 s</label>
+    <label class="sw"><input type="checkbox" id="cT"> Drop requests that waited more than 5 s</label>
+  </div>
+</div>
+<script>
+(function(){
+"use strict";
+const W = 1080, H = 1350;
+const STEPS_PER_S = 100;          // simulation step = 10 ms
+const SLOTS = 100;                // Postgres default max_connections
+const REFRESH_AFTER = 5;          // seconds
+const TIMEOUT_AFTER = 5;          // seconds in line before a request is dropped (switch)
+const TOUR_END = 30;
+
+const C = {
+  bg:'#0d1117', panel:'#161b22', line:'#30363d', text:'#e6edf3', dim:'#8b949e',
+  read:'#3a4250', arrive:'#252c36', wait:'#f5b83d', late:'#ff5a5f', got:'#3ddc97',
+  live:'#3ddc97', ghost:'#9b7bff', empty:'#222a35', blue:'#58a6ff'
+};
+
+function tourPeople(t){ return t < 3 ? 50 : (t < 13 ? 1000 : 50); }
+
+function makeRng(seed){
+  return function(){
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------------- simulation ----------------
+function Sim(q, refresh, peopleFn, timeout){
+  this.q = q; this.refresh = refresh; this.peopleFn = peopleFn;
+  this.rng = makeRng(20261125);
+  this.k = 0; this.t = 0;
+  this.people = [];
+  this.queue = []; this.qh = 0;
+  this.conns = new Array(SLOTS).fill(null);
+  this.done = []; this.dh = 0;
+  this.samples = [];
+  this.served = 0; this.ghostRun = 0; this.refreshes = 0;
+  this.maxSamples = Infinity;
+  this.timeout = !!timeout; this.dropped = 0;
+}
+Sim.prototype.newReq = function(p){
+  const r = {p:p, t0:this.t, ghost:false};
+  p.req = r; p.state = 'wait';
+  this.queue.push(r);
+};
+Sim.prototype.queueLen = function(){ return this.queue.length - this.qh; };
+Sim.prototype.step = function(){
+  this.k++;
+  const t = this.t = this.k / STEPS_PER_S;
+  const rng = this.rng;
+  // who is on the site
+  const target = Math.max(0, Math.round(this.peopleFn(t)));
+  const first = this.k === 1;
+  while (this.people.length < target){
+    this.people.push(first
+      ? {state:'think', next:t + rng()*10, firstT:0, req:null, doneAt:-9}
+      : {state:'arrive', next:t + rng()*1.0, firstT:0, req:null, doneAt:-9});
+  }
+  while (this.people.length > target){
+    const p = this.people.pop();
+    if (p.req){ p.req.ghost = true; p.req.p = null; }   // closing the tab doesn't cancel the query
+  }
+  // finished queries
+  for (let i = 0; i < SLOTS; i++){
+    const c = this.conns[i];
+    if (c && c.end <= t + 1e-9){
+      const r = c.req;
+      if (!r.ghost && r.p){
+        const p = r.p;
+        this.done.push({t:t, w:t - p.firstT});
+        p.state = 'think'; p.next = t + 5 + rng()*10; p.req = null; p.doneAt = t;
+        this.served++;
+      } else {
+        this.ghostRun++;
+      }
+      this.conns[i] = null;
+    }
+  }
+  // people: refresh, or click a new page
+  for (let i = 0; i < this.people.length; i++){
+    const p = this.people[i];
+    if (p.state === 'wait'){
+      if (this.refresh && t - p.req.t0 >= REFRESH_AFTER){
+        p.req.ghost = true; p.req.p = null;
+        this.newReq(p);
+        this.refreshes++;
+      }
+    } else if (t >= p.next){
+      p.firstT = t;
+      this.newReq(p);
+    }
+  }
+  // queue timeout (switch): a request that waited in line more than 5 s is dropped and never runs.
+  // The line is in arrival order, so the oldest requests are always at its head.
+  if (this.timeout){
+    while (this.qh < this.queue.length && t - this.queue[this.qh].t0 > TIMEOUT_AFTER){
+      const r = this.queue[this.qh++];
+      r.dropped = true;
+      this.dropped++;
+      if (!r.ghost && r.p && !this.refresh){
+        const p = r.p;
+        r.p = null;
+        this.newReq(p);   // the app returned an error; they try again once (firstT kept)
+      }
+      // with refresh on, a waiting person refreshes at 5 s as before
+    }
+  }
+  // free connections take the next request in line
+  for (let i = 0; i < SLOTS; i++){
+    if (!this.conns[i] && this.qh < this.queue.length){
+      const r = this.queue[this.qh++];
+      this.conns[i] = {req:r, end:t + this.q * (0.8 + 0.4*rng())};
+    }
+  }
+  if (this.qh > 5000){ this.queue = this.queue.slice(this.qh); this.qh = 0; }
+  while (this.dh < this.done.length && this.done[this.dh].t < t - 1) this.dh++;
+  if (this.dh > 5000){ this.done = this.done.slice(this.dh); this.dh = 0; }
+  if (this.k % 10 === 0) this.sample();
+};
+Sim.prototype.waitNow = function(){
+  const n = this.done.length - this.dh;
+  if (n > 0){
+    const ws = [];
+    for (let i = this.dh; i < this.done.length; i++) ws.push(this.done[i].w);
+    ws.sort((a,b)=>a-b);
+    return {w:ws[Math.floor(ws.length/2)], still:false};
+  }
+  let m = -1;
+  for (const p of this.people) if (p.state === 'wait') m = Math.max(m, this.t - p.firstT);
+  if (m >= 0) return {w:m, still:true};
+  return {w:null, still:false};
+};
+Sim.prototype.sample = function(){
+  const wn = this.waitNow();
+  this.samples.push({t:this.t, w:wn.w, q:this.queueLen()});
+  if (this.samples.length > this.maxSamples) this.samples.shift();
+};
+Sim.prototype.runTo = function(t){
+  const kEnd = Math.round(t * STEPS_PER_S);
+  while (this.k < kEnd) this.step();
+};
+Sim.prototype.ghostsInLine = function(){
+  let g = 0;
+  for (let i = this.qh; i < this.queue.length; i++) if (this.queue[i].ghost) g++;
+  return g;
+};
+
+// ---------------- drawing ----------------
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const fmtS = s => s == null ? '—' : (s < 10 ? s.toFixed(1) : s.toFixed(0)) + ' s';
+const fmtQ = ms => ms >= 1000 ? (ms/1000).toFixed(ms % 1000 ? 2 : 0).replace(/\.?0+$/,'') + ' s' : ms + ' ms';
+
+function txt(s, x, y, size, color, weight, align){
+  ctx.font = (weight || 400) + ' ' + size + 'px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+  ctx.fillStyle = color || C.text;
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(s, x, y);
+}
+// largest size <= size at which s fits in maxW (same font string as txt)
+function fitSize(s, size, weight, maxW){
+  let sz = size;
+  for (;;){
+    ctx.font = (weight || 400) + ' ' + sz + 'px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+    if (sz <= 14 || ctx.measureText(s).width <= maxW) return sz;
+    sz--;
+  }
+}
+function rrect(x, y, w, h, r, fill){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+function waitColor(w){ return w == null ? C.dim : (w < 2 ? C.got : (w < REFRESH_AFTER ? C.wait : C.late)); }
+
+function tile(x, y, w, h, label, value, color, sub){
+  rrect(x, y, w, h, 18, C.panel);
+  txt(label, x+22, y+46, 30, C.dim, 500);
+  txt(value, x+22, y+132, 78, color, 800);
+  if (sub) txt(sub, x+22, y+164, 24, C.dim, 500);
+}
+
+function chart(x, y, w, h, sim, key, tMin, tMax, yMax, color, tour, ref){
+  rrect(x, y, w, h, 12, C.panel);
+  const px = t => x + (t - tMin) / (tMax - tMin) * w;
+  const py = v => y + h - Math.min(v, yMax) / yMax * (h - 10);
+  if (tour){
+    ctx.fillStyle = 'rgba(88,166,255,0.10)';
+    ctx.fillRect(px(3), y, px(13) - px(3), h);
+    txt('1,000 people', px(8), y+26, 22, C.blue, 600, 'center');
+  }
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  for (let i = 1; i <= 2; i++){
+    const v = yMax * i / 2;
+    ctx.beginPath(); ctx.moveTo(x, py(v)); ctx.lineTo(x+w, py(v)); ctx.stroke();
+    txt(key === 'w' ? fmtS(v) : fmt(v), x+w-8, py(v)+24, 22, C.dim, 500, 'right');
+  }
+  if (ref != null){
+    ctx.save(); ctx.setLineDash([10,8]); ctx.strokeStyle = C.late; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, py(ref)); ctx.lineTo(x+w, py(ref)); ctx.stroke(); ctx.restore();
+    txt(sim.refresh ? '5 s: refresh' : '5 s', x+10, py(ref)-8, 22, C.late, 600);
+  }
+  ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  let pen = false;
+  for (const s of sim.samples){
+    if (s.t < tMin) continue;
+    const v = s[key];
+    if (v == null){ pen = false; continue; }
+    if (!pen){ ctx.moveTo(px(s.t), py(v)); pen = true; } else ctx.lineTo(px(s.t), py(v));
+  }
+  ctx.stroke();
+  // now marker
+  ctx.strokeStyle = 'rgba(230,237,243,0.5)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(px(sim.t), y); ctx.lineTo(px(sim.t), y+h); ctx.stroke();
+  txt(Math.round(tMin) + ' s', x+6, y+h+26, 20, C.dim, 500);
+  txt(Math.round(tMax) + ' s', x+w-6, y+h+26, 20, C.dim, 500, 'right');
+}
+
+function draw(sim, tour){
+  const t = sim.t;
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+
+  // header
+  txt('1,000 people open my app at once', 36, 72, 50, C.text, 800);
+  txt('t = ' + t.toFixed(2) + ' s   ·   ' + (tour ? 'auto tour' : 'manual') + '   ·   1 server, 1 Postgres', 36, 118, 30, C.dim, 500);
+
+  // tiles
+  const wn = sim.waitNow();
+  const nPeople = sim.people.length;
+  const ql = sim.queueLen();
+  tile(30, 145, 330, 180, 'People on site', fmt(nPeople), C.blue);
+  tile(375, 145, 330, 180, 'Waiting in line', fmt(ql), ql > 0 ? (ql > 200 ? C.late : C.wait) : C.got);
+  tile(720, 145, 330, 180, wn.still ? 'Still waiting' : 'Page loads in', fmtS(wn.w), waitColor(wn.w), wn.still ? 'no page has loaded in 1 s' : 'median, last second');
+
+  // people grid
+  txt('People  (1 dot = 1 person)', 36, 368, 30, C.text, 700);
+  const gx = 36, gy = 385, gw = 560, gh = 240;
+  rrect(gx-8, gy-8, gw+16, gh+16, 12, C.panel);
+  const cols = 50;
+  const rows = Math.max(1, Math.ceil(nPeople / cols));
+  const sp = Math.min(gw / cols, gh / rows);
+  const sz = Math.max(1.5, sp * 0.72);
+  const buckets = {};
+  buckets[C.arrive] = []; buckets[C.read] = []; buckets[C.got] = []; buckets[C.wait] = []; buckets[C.late] = [];
+  for (let i = 0; i < nPeople; i++){
+    const p = sim.people[i];
+    let col;
+    if (p.state === 'arrive') col = C.arrive;
+    else if (p.state === 'wait') col = (t - p.firstT) >= REFRESH_AFTER ? C.late : C.wait;
+    else col = (t - p.doneAt) < 0.5 ? C.got : C.read;
+    buckets[col].push(i);
+  }
+  for (const col in buckets){
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    for (const i of buckets[col]){
+      const cx = gx + (i % cols) * sp, cy = gy + Math.floor(i / cols) * sp;
+      ctx.rect(cx, cy, sz, sz);
+    }
+    ctx.fill();
+  }
+  // legend
+  const leg = [[C.read,'reading'],[C.wait,'waiting'],[C.late,'waiting > 5 s'],[C.got,'got the page']];
+  let lx = 36;
+  for (const [col, name] of leg){
+    ctx.fillStyle = col; ctx.fillRect(lx, 648, 20, 20);
+    txt(name, lx+28, 667, 24, C.dim, 500);
+    ctx.font = '500 24px sans-serif';
+    lx += 28 + ctx.measureText(name).width + 26;
+  }
+
+  // DB connections
+  let busy = 0, ghostBusy = 0;
+  for (const c of sim.conns) if (c){ busy++; if (c.req.ghost) ghostBusy++; }
+  txt('Postgres: ' + busy + ' / ' + SLOTS + ' busy', 640, 368, 30, busy >= SLOTS ? C.late : C.text, 700);
+  const dx = 640, dy = 385, cw = 38, ch = 21, gap = 3;
+  rrect(dx-8, dy-8, 10*(cw+gap)-gap+16, 10*(ch+gap)-gap+16, 12, C.panel);
+  for (let i = 0; i < SLOTS; i++){
+    const c = sim.conns[i];
+    const x = dx + (i % 10) * (cw + gap), y = dy + Math.floor(i / 10) * (ch + gap);
+    ctx.fillStyle = !c ? C.empty : (c.req.ghost ? C.ghost : C.live);
+    ctx.fillRect(x, y, cw, ch);
+  }
+  txt('default max_connections = 100', 640, 667, 24, C.dim, 500);
+
+  // queue lane
+  const ghosts = sim.ghostsInLine();
+  txt('In line for a connection: ' + fmt(ql), 36, 722, 34, ql > 0 ? C.wait : C.text, 800);
+  txt(ghosts > 0 ? fmt(ghosts) + ' of them are for people who already left or refreshed' : 'Every request waits here until a connection is free',
+      36, 758, 26, ghosts > 0 ? C.ghost : C.dim, 600);
+  const lx0 = 36, ly0 = 778, qsz = 11, qsp = 14, qcols = 72, qrows = 5;
+  rrect(lx0-8, ly0-8, qcols*qsp+12, qrows*qsp+12, 10, C.panel);
+  const shown = Math.min(ql, qcols*qrows);
+  for (let i = 0; i < shown; i++){
+    const r = sim.queue[sim.qh + i];
+    ctx.fillStyle = r.ghost ? C.ghost : C.wait;
+    ctx.fillRect(lx0 + (i % qcols) * qsp, ly0 + Math.floor(i / qcols) * qsp, qsz, qsz);
+  }
+  if (ql > shown) txt('+ ' + fmt(ql - shown) + ' more', 1044, 722, 28, C.dim, 600, 'right');
+
+  // charts
+  let tMin, tMax;
+  if (tour){ tMin = 0; tMax = TOUR_END; }
+  else { tMax = Math.max(30, t); tMin = tMax - 30; }
+  let wMax = 10, qMax = 200;
+  for (const s of sim.samples){
+    if (s.t < tMin) continue;
+    if (s.w != null) wMax = Math.max(wMax, s.w);
+    qMax = Math.max(qMax, s.q);
+  }
+  wMax = Math.ceil(wMax / 5) * 5;
+  qMax = Math.ceil(qMax / 100) * 100;
+  txt('Wait for the page (from first click)', 36, 900, 28, C.text, 700);
+  chart(36, 912, 1008, 120, sim, 'w', tMin, tMax, wMax, C.late, tour, REFRESH_AFTER);
+  txt('Requests in line', 36, 1098, 28, C.text, 700);
+  chart(36, 1110, 1008, 100, sim, 'q', tMin, tMax, qMax, C.wait, tour, null);
+
+  // footer
+  const qs = sim.q;
+  const f1 = '1 query = ' + fmtQ(Math.round(qs*1000)) + '    ·    Refresh after 5 s: ' + (sim.refresh ? 'ON' : 'OFF') +
+             '    ·    Drop after 5 s in line: ' + (sim.timeout ? 'ON' : 'OFF');
+  txt(f1, 36, 1282, fitSize(f1, 34, 800, W - 72), C.text, 800);
+  const f2 = 'Most it can serve: 100 connections ÷ ' + fmtQ(Math.round(qs*1000)) + ' = ' + fmt(SLOTS / qs) + ' pages/s   ·   wasted queries: ' + fmt(sim.ghostRun + ghostBusy) +
+             '   ·   dropped: ' + fmt(sim.dropped);
+  txt(f2, 36, 1325, fitSize(f2, 26, 500, W - 72), C.dim, 500);
+}
+
+// ---------------- controls + modes ----------------
+const sP = document.getElementById('sP'), sQ = document.getElementById('sQ'), cR = document.getElementById('cR');
+const cT = document.getElementById('cT');
+const vP = document.getElementById('vP'), vQ = document.getElementById('vQ');
+const bTour = document.getElementById('bTour'), bMan = document.getElementById('bMan');
+
+let mode = 'tour';
+let fixedT = null;
+let sim = null;
+let clock = 0, lastWall = null, holdUntil = 0;
+
+function readUrl(){
+  const s = (location.hash || '') + '&' + (location.search || '').replace(/^\?/, '');
+  const mt = s.match(/(?:^|[#&?])t=([0-9]*\.?[0-9]+)/);
+  const mr = s.match(/(?:^|[#&?])refresh=([01])/);
+  const mo = s.match(/(?:^|[#&?])timeout=([01])/);
+  const mq = s.match(/(?:^|[#&?])q=([0-9]+)/);
+  fixedT = mt ? parseFloat(mt[1]) : null;
+  if (mr) cR.checked = mr[1] === '1';
+  if (mo) cT.checked = mo[1] === '1';
+  if (mq) sQ.value = Math.max(10, Math.min(3000, parseInt(mq[1], 10)));
+}
+function labels(){
+  vP.textContent = fmt(mode === 'tour' && sim ? tourPeople(sim.t) : +sP.value);
+  vQ.textContent = fmtQ(+sQ.value);
+  bTour.classList.toggle('on', mode === 'tour');
+  bMan.classList.toggle('on', mode === 'manual');
+}
+function newTour(){
+  sim = new Sim(+sQ.value / 1000, cR.checked, tourPeople, cT.checked);
+  clock = 0; holdUntil = 0;
+}
+function renderFixed(){
+  mode = 'tour';
+  newTour();
+  sim.runTo(fixedT);
+  labels();
+  draw(sim, true);
+  window.__frameReady = true;
+}
+
+bTour.onclick = () => { if (fixedT != null) return; mode = 'tour'; newTour(); labels(); };
+bMan.onclick = () => {
+  if (fixedT != null) return;
+  if (mode === 'tour'){ sP.value = tourPeople(sim.t); }
+  mode = 'manual';
+  sim.peopleFn = () => +sP.value;
+  sim.maxSamples = 320;
+  clock = sim.t;
+  labels();
+};
+sP.oninput = () => {
+  if (fixedT != null){ labels(); return; }
+  if (mode === 'tour') bMan.onclick();
+  labels();
+};
+sQ.oninput = () => {
+  labels();
+  if (fixedT != null){ renderFixed(); return; }
+  if (mode === 'tour') newTour(); else sim.q = +sQ.value / 1000;
+};
+cR.onchange = () => {
+  if (fixedT != null){ renderFixed(); return; }
+  if (mode === 'tour') newTour(); else sim.refresh = cR.checked;
+};
+cT.onchange = () => {
+  if (fixedT != null){ renderFixed(); return; }
+  if (mode === 'tour') newTour(); else sim.timeout = cT.checked;
+};
+
+function frame(now){
+  if (fixedT != null) return;
+  if (lastWall == null) lastWall = now;
+  const dt = Math.min(0.1, (now - lastWall) / 1000);
+  lastWall = now;
+  clock += dt;
+  if (mode === 'tour'){
+    if (clock > TOUR_END + 2) newTour();
+    sim.runTo(Math.min(clock, TOUR_END));
+  } else {
+    sim.runTo(clock);
+  }
+  labels();
+  draw(sim, mode === 'tour');
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('hashchange', () => {
+  const was = fixedT;
+  readUrl();
+  if (fixedT != null) renderFixed();
+  else if (was != null){ newTour(); lastWall = null; requestAnimationFrame(frame); }
+});
+
+readUrl();
+if (fixedT != null) renderFixed();
+else { newTour(); labels(); requestAnimationFrame(frame); }
+})();
+</script>
+</body>
+</html>
