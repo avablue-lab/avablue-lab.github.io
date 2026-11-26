@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Night Skate</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#02040c;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#eaf4ff}
+  canvas{display:block}
+  #hud{position:fixed;top:16px;left:20px;pointer-events:none;text-shadow:0 0 10px rgba(120,180,255,.7)}
+  #score{font-size:36px;font-weight:800;letter-spacing:1px;color:#ffe27a;text-shadow:0 0 12px rgba(255,200,80,.8)}
+  #sub{font-size:14px;opacity:.8;margin-top:2px}
+  #msg{position:fixed;left:50%;top:40%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;text-shadow:0 0 14px rgba(60,120,255,.9)}
+  #msg h1{margin:0 0 8px;font-size:44px;letter-spacing:2px}
+  #msg p{margin:4px 0;font-size:18px;opacity:.9}
+  #demo{position:fixed;right:16px;top:16px;font-size:13px;opacity:.75;pointer-events:none;font-variant-numeric:tabular-nums}
+  #help{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);font-size:13px;opacity:.6;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud"><div id="score">&#9733; 0</div><div id="sub">best 0 &middot; 0 m</div></div>
+<div id="msg"></div>
+<div id="demo"></div>
+<div id="help">&larr; &rarr; or A / D to steer &middot; collect the stars &middot; avoid the cracks</div>
+<script src="../../_lib/three-r128.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- constants ----------
+  var DT = 1 / 60;
+  var CELL = 16;
+  var VIEW = 6;
+  var TURN = 2.1;
+  var TRAIL_MAX = 260;
+
+  // ---------- seeded random ----------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function hash3(x, y, s) {
+    var h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h ^= h >>> 16;
+    return h >>> 0;
+  }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function mod(a, n) { return ((a % n) + n) % n; }
+
+  // ---------- demo mode ----------
+  function parseT() {
+    var m = /t=([0-9]*\.?[0-9]+)/.exec(location.hash || '');
+    return m ? parseFloat(m[1]) : null;
+  }
+  var demoT = parseT();
+  var DEMO = demoT !== null;
+  var DEMO_SEED = 20261125;
+
+  // ---------- renderer / scene ----------
+  var renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  var FOG = 0x0b1636;
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(FOG);
+  scene.fog = new THREE.Fog(FOG, 30, 140);
+
+  var camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1200);
+
+  // ---------- textures ----------
+  function makeGlow() {
+    var c = document.createElement('canvas'); c.width = c.height = 128;
+    var g = c.getContext('2d');
+    var gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.2, 'rgba(255,255,255,0.6)');
+    gr.addColorStop(0.5, 'rgba(255,255,255,0.15)');
+    gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  }
+  var glowTex = makeGlow();
+
+  function makeIceTexture() {
+    var S = 512;
+    var c = document.createElement('canvas'); c.width = c.height = S;
+    var g = c.getContext('2d');
+    var r = mulberry32(12345);
+    g.fillStyle = '#8fb2d2'; g.fillRect(0, 0, S, S);
+    var offs = [-S, 0, S];
+    var i, a, b;
+    for (i = 0; i < 220; i++) {
+      var x = r() * S, y = r() * S, rad = 10 + r() * 60, al = 0.05 + r() * 0.08, light = r() < 0.5;
+      for (a = 0; a < 3; a++) for (b = 0; b < 3; b++) {
+        var cx = x + offs[a], cy = y + offs[b];
+        if (cx + rad < 0 || cx - rad > S || cy + rad < 0 || cy - rad > S) continue;
+        var gr = g.createRadialGradient(cx, cy, 0, cx, cy, rad);
+        gr.addColorStop(0, light ? 'rgba(220,240,255,' + al + ')' : 'rgba(30,70,125,' + al + ')');
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr; g.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+      }
+    }
+    g.lineCap = 'round';
+    for (i = 0; i < 90; i++) {
+      var sx = r() * S, sy = r() * S, len = 30 + r() * 140, an = r() * Math.PI * 2, cu = (r() - 0.5) * 0.8;
+      g.strokeStyle = 'rgba(235,248,255,' + (0.08 + r() * 0.18).toFixed(3) + ')';
+      g.lineWidth = 0.6 + r() * 1.2;
+      for (a = 0; a < 3; a++) for (b = 0; b < 3; b++) {
+        var ox = offs[a], oy = offs[b];
+        g.beginPath();
+        g.moveTo(sx + ox, sy + oy);
+        g.quadraticCurveTo(sx + ox + Math.cos(an + cu) * len * 0.5, sy + oy + Math.sin(an + cu) * len * 0.5,
+          sx + ox + Math.cos(an) * len, sy + oy + Math.sin(an) * len);
+        g.stroke();
+      }
+    }
+    for (i = 0; i < 260; i++) {
+      g.fillStyle = 'rgba(255,255,255,' + (0.15 + r() * 0.35).toFixed(3) + ')';
+      g.beginPath(); g.arc(r() * S, r() * S, 0.6 + r() * 1.4, 0, Math.PI * 2); g.fill();
+    }
+    var t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(60, 60);
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return t;
+  }
+
+  // ---------- lights ----------
+  var hemi = new THREE.HemisphereLight(0x6f8fd6, 0x0a1224, 0.75);
+  scene.add(hemi);
+  var MOON_DIR = new THREE.Vector3(-0.35, 0.42, -0.84).normalize();
+  var moonLight = new THREE.DirectionalLight(0xc6d8ff, 0.85);
+  moonLight.castShadow = true;
+  moonLight.shadow.mapSize.set(1024, 1024);
+  moonLight.shadow.camera.left = -14; moonLight.shadow.camera.right = 14;
+  moonLight.shadow.camera.top = 14; moonLight.shadow.camera.bottom = -14;
+  moonLight.shadow.camera.near = 1; moonLight.shadow.camera.far = 90;
+  moonLight.shadow.bias = -0.0006;
+  scene.add(moonLight); scene.add(moonLight.target);
+  var lantern = new THREE.PointLight(0xbfe0ff, 0.55, 11, 2);
+  scene.add(lantern);
+
+  // ---------- ice ----------
+  var iceMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: makeIceTexture(), roughness: 0.32, metalness: 0.15 });
+  var iceGeo = new THREE.PlaneGeometry(600, 600);
+  iceGeo.rotateX(-Math.PI / 2);
+  var ice = new THREE.Mesh(iceGeo, iceMat);
+  ice.receiveShadow = true;
+  scene.add(ice);
+
+  // ---------- sky ----------
+  var skyGroup = new THREE.Group();
+  scene.add(skyGroup);
+  var skyMat = new THREE.ShaderMaterial({
+    uniforms: { top: { value: new THREE.Color(0x01030a) }, hor: { value: new THREE.Color(FOG) } },
+    vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: 'uniform vec3 top; uniform vec3 hor; varying vec3 vP; void main(){ float h = max(vP.y, 0.0); gl_FragColor = vec4(mix(hor, top, pow(h, 0.55)), 1.0); }',
+    side: THREE.BackSide, depthWrite: false
+  });
+  var sky = new THREE.Mesh(new THREE.SphereGeometry(500, 32, 16), skyMat);
+  sky.renderOrder = -10;
+  skyGroup.add(sky);
+
+  (function buildSkyStars() {
+    var r = mulberry32(777);
+    var N = 1600, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+    for (var i = 0; i < N; i++) {
+      var u = r() * Math.PI * 2, v = Math.pow(r(), 0.8) * 0.95 + 0.05;
+      var cy = v, rr = Math.sqrt(1 - cy * cy);
+      pos[i * 3] = Math.cos(u) * rr * 450; pos[i * 3 + 1] = cy * 450; pos[i * 3 + 2] = Math.sin(u) * rr * 450;
+      var b = 0.4 + r() * 0.6, tint = r();
+      col[i * 3] = b * (tint < 0.2 ? 1.0 : 0.85); col[i * 3 + 1] = b * 0.92; col[i * 3 + 2] = b * (tint > 0.7 ? 1.0 : 0.9);
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var m = new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, depthWrite: false });
+    var p = new THREE.Points(g, m); p.renderOrder = -9;
+    skyGroup.add(p);
+  })();
+
+  var moon = new THREE.Mesh(new THREE.SphereGeometry(14, 24, 16), new THREE.MeshBasicMaterial({ color: 0xf3f1e0, fog: false }));
+  moon.position.copy(MOON_DIR).multiplyScalar(420);
+  moon.renderOrder = -8;
+  skyGroup.add(moon);
+  var moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xaec8ff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+  moonGlow.position.copy(moon.position).multiplyScalar(0.98);
+  moonGlow.scale.set(110, 110, 1);
+  moonGlow.renderOrder = -7;
+  skyGroup.add(moonGlow);
+
+  var auroraMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: [
+      'uniform float uTime; varying vec2 vUv;',
+      'void main(){',
+      '  float x = vUv.x;',
+      '  float wave = sin(x*18.0 + uTime*0.6)*0.5 + sin(x*41.0 - uTime*0.9)*0.25 + sin(x*7.0 + uTime*0.3)*0.5;',
+      '  float top = 0.75 + 0.18*wave;',
+      '  float band = smoothstep(0.0, 0.3, vUv.y) * (1.0 - smoothstep(top - 0.35, top, vUv.y));',
+      '  float rays = 0.55 + 0.45*sin(x*160.0 + wave*3.0 + uTime*1.5);',
+      '  float edge = smoothstep(0.0, 0.15, x) * smoothstep(1.0, 0.85, x);',
+      '  vec3 col = mix(vec3(0.1, 0.95, 0.55), vec3(0.55, 0.3, 0.95), smoothstep(0.2, 0.9, vUv.y));',
+      '  float a = band * rays * edge * 0.45 * (0.7 + 0.3*wave);',
+      '  gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));',
+      '}'
+    ].join('\n'),
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide
+  });
+  var aurora = new THREE.Mesh(new THREE.CylinderGeometry(380, 380, 130, 96, 1, true, Math.PI - 0.7 - 1.1, 2.2), auroraMat);
+  aurora.position.y = 95;
+  aurora.renderOrder = -6;
+  skyGroup.add(aurora);
+
+  var trees = new THREE.Group();
+  (function buildTrees() {
+    var r = mulberry32(4321);
+    var mat = new THREE.MeshBasicMaterial({ color: 0x03060f, fog: false });
+    var geo = new THREE.ConeGeometry(1, 1, 7);
+    geo.translate(0, 0.5, 0);
+    for (var i = 0; i < 170; i++) {
+      var a = r() * Math.PI * 2, d = 235 + r() * 50, h = 12 + r() * 22, w = h * (0.22 + r() * 0.1);
+      var t = new THREE.Mesh(geo, mat);
+      t.position.set(Math.cos(a) * d, -1, Math.sin(a) * d);
+      t.scale.set(w, h, w);
+      trees.add(t);
+    }
+    var hill = new THREE.Mesh(new THREE.CylinderGeometry(262, 262, 5, 64, 1, true), mat);
+    hill.position.y = 1.5;
+    trees.add(hill);
+  })();
+  scene.add(trees);
+
+  // ---------- snow ----------
+  var SNOW = 700;
+  var snowBase = new Float32Array(SNOW * 3);
+  (function () { var r = mulberry32(999); for (var i = 0; i < SNOW; i++) { snowBase[i * 3] = r() * 60; snowBase[i * 3 + 1] = r() * 24; snowBase[i * 3 + 2] = r() * 60; } })();
+  var snowGeo = new THREE.BufferGeometry();
+  snowGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(SNOW * 3), 3));
+  var snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({ size: 0.14, map: glowTex, color: 0xe8f2ff, transparent: true, opacity: 0.75, depthWrite: false }));
+  snow.frustumCulled = false;
+  scene.add(snow);
+
+  // ---------- shared star / crack assets ----------
+  function starShape() {
+    var s = new THREE.Shape();
+    for (var i = 0; i < 10; i++) {
+      var a = i / 10 * Math.PI * 2 + Math.PI / 2, rad = i % 2 === 0 ? 0.46 : 0.19;
+      var x = Math.cos(a) * rad, y = Math.sin(a) * rad;
+      if (i === 0) s.moveTo(x, y); else s.lineTo(x, y);
+    }
+    s.closePath();
+    return s;
+  }
+  var starGeo = new THREE.ExtrudeGeometry(starShape(), { depth: 0.12, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.04, bevelSegments: 2 });
+  starGeo.center();
+  var starMat = new THREE.MeshStandardMaterial({ color: 0xffd75a, emissive: 0xffb300, emissiveIntensity: 1.1, metalness: 0.3, roughness: 0.35 });
+  var poolGeo = new THREE.PlaneGeometry(3.2, 3.2); poolGeo.rotateX(-Math.PI / 2);
+
+  var crackCoreMat = new THREE.MeshBasicMaterial({ color: 0x050f1d, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  var crackHaloMat = new THREE.MeshBasicMaterial({ color: 0xd6ebff, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  var crackHoleGeo = new THREE.CircleGeometry(0.55, 7); crackHoleGeo.rotateX(-Math.PI / 2);
+
+  function crackGeometry(segs, widen, y) {
+    var pos = [], idx = [], v = 0;
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      var dx = s.x2 - s.x1, dz = s.z2 - s.z1, L = Math.hypot(dx, dz) || 1;
+      var nx = -dz / L, nz = dx / L, w = s.w * widen / 2;
+      var ex = dx / L * w * 0.5, ez = dz / L * w * 0.5;
+      var ax = s.x1 - ex, az = s.z1 - ez, bx = s.x2 + ex, bz = s.z2 + ez;
+      pos.push(ax + nx * w, y, az + nz * w, ax - nx * w, y, az - nz * w,
+        bx - nx * w * 0.6, y, bz - nz * w * 0.6, bx + nx * w * 0.6, y, bz + nz * w * 0.6);
+      idx.push(v, v + 1, v + 2, v, v + 2, v + 3);
+      v += 4;
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    return g;
+  }
+
+  // ---------- world generation ----------
+  var worldSeed = null;
+  var cellCache = new Map();
+
+  function segDist(x, z, s) {
+    var dx = s.x2 - s.x1, dz = s.z2 - s.z1, L2 = dx * dx + dz * dz;
+    var t = L2 > 0 ? ((x - s.x1) * dx + (z - s.z1) * dz) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    var qx = s.x1 + dx * t - x, qz = s.z1 + dz * t - z;
+    return Math.sqrt(qx * qx + qz * qz);
+  }
+  // signed distance to the hazard: < 0 means the skater breaks through
+  function crackDist(k, x, z) {
+    var m = Math.hypot(k.x - x, k.z - z) - 0.55;
+    for (var i = 0; i < k.segs.length; i++) {
+      var s = k.segs[i];
+      var d = segDist(x, z, s) - (0.28 + s.w * 0.5);
+      if (d < m) m = d;
+    }
+    return m;
+  }
+
+  function genCrack(r, cx, cz) {
+    var segs = [], rays = 3 + Math.floor(r() * 3), a0 = r() * Math.PI * 2, maxR = 0.6;
+    for (var i = 0; i < rays; i++) {
+      var a = a0 + i * (Math.PI * 2 / rays) + (r() - 0.5) * 0.9;
+      var x = cx, z = cz, n = 2 + Math.floor(r() * 3), w = 0.22 + r() * 0.08;
+      for (var j = 0; j < n; j++) {
+        var len = 0.9 + r() * 1.5;
+        a += (r() - 0.5) * 0.9;
+        var nx = x + Math.cos(a) * len, nz = z + Math.sin(a) * len;
+        segs.push({ x1: x, z1: z, x2: nx, z2: nz, w: w });
+        if (r() < 0.35) {
+          var ba = a + (r() < 0.5 ? 1 : -1) * (0.6 + r() * 0.6), bl = 0.5 + r() * 0.9;
+          var bx = nx + Math.cos(ba) * bl, bz = nz + Math.sin(ba) * bl;
+          segs.push({ x1: nx, z1: nz, x2: bx, z2: bz, w: w * 0.6 });
+          maxR = Math.max(maxR, Math.hypot(bx - cx, bz - cz));
+        }
+        x = nx; z = nz; w *= 0.75;
+        maxR = Math.max(maxR, Math.hypot(x - cx, z - cz));
+      }
+    }
+    return { x: cx, z: cz, segs: segs, radius: maxR, rot: r() * Math.PI * 2 };
+  }
+
+  function genCell(cx, cz) {
+    var r = mulberry32(hash3(cx, cz, worldSeed));
+    var ox = cx * CELL, oz = cz * CELL;
+    var cell = { cx: cx, cz: cz, stars: [], cracks: [] };
+    var dOrigin = Math.hypot(ox + CELL / 2, oz + CELL / 2);
+    var safe = dOrigin < CELL * 1.6;
+    var chance = 0.45 + Math.min(0.25, dOrigin / 2500);
+    if (!safe && r() < chance) {
+      var kx = ox + 4 + r() * (CELL - 8);
+      var kz = oz + 4 + r() * (CELL - 8);
+      cell.cracks.push(genCrack(r, kx, kz));
+    }
+    var roll = r();
+    var ns = roll < 0.2 ? 0 : roll < 0.75 ? 1 : 2;
+    if (safe && ns === 0) ns = 1;
+    for (var i = 0; i < ns; i++) {
+      for (var tries = 0; tries < 5; tries++) {
+        var x = ox + 1.5 + r() * (CELL - 3), z = oz + 1.5 + r() * (CELL - 3), ok = true, q;
+        for (q = 0; q < cell.cracks.length; q++) if (crackDist(cell.cracks[q], x, z) < 1.6) ok = false;
+        for (q = 0; q < cell.stars.length; q++) if (Math.hypot(cell.stars[q].x - x, cell.stars[q].z - z) < 3) ok = false;
+        if (ok) { cell.stars.push({ x: x, z: z, key: cx + ',' + cz + ',' + i, phase: r() * 6.283 }); break; }
+      }
+    }
+    return cell;
+  }
+
+  function getCell(cx, cz) {
+    var k = cx + ',' + cz;
+    var c = cellCache.get(k);
+    if (!c) {
+      c = genCell(cx, cz);
+      cellCache.set(k, c);
+      if (cellCache.size > 4000) pruneCache();
+    }
+    return c;
+  }
+  function pruneCache() {
+    var ccx = Math.floor(px / CELL), ccz = Math.floor(pz / CELL);
+    cellCache.forEach(function (c, k) {
+      if (Math.abs(c.cx - ccx) > VIEW + 3 || Math.abs(c.cz - ccz) > VIEW + 3) cellCache.delete(k);
+    });
+  }
+
+  // ---------- cell meshes ----------
+  var cellMeshes = new Map();
+  function buildCellMesh(cell) {
+    var g = new THREE.Group(), stars = [], geos = [], mats = [];
+    for (var i = 0; i < cell.stars.length; i++) {
+      var s = cell.stars[i];
+      var sg = new THREE.Group();
+      sg.position.set(s.x, 0, s.z);
+      var mesh = new THREE.Mesh(starGeo, starMat);
+      mesh.position.y = 1.15;
+      sg.add(mesh);
+      var spm = new THREE.SpriteMaterial({ map: glowTex, color: 0xffd27a, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+      var sp = new THREE.Sprite(spm);
+      sp.scale.set(2.6, 2.6, 1);
+      sp.position.y = 1.15;
+      sg.add(sp);
+      var pm = new THREE.MeshBasicMaterial({ map: glowTex, color: 0xffc860, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+      var pool = new THREE.Mesh(poolGeo, pm);
+      pool.position.y = 0.03;
+      sg.add(pool);
+      mats.push(spm, pm);
+      g.add(sg);
+      stars.push({ group: sg, mesh: mesh, sprite: sp, pool: pool, key: s.key, phase: s.phase, x: s.x, z: s.z });
+    }
+    for (var j = 0; j < cell.cracks.length; j++) {
+      var k = cell.cracks[j];
+      var halo = crackGeometry(k.segs, 3.2, 0.012);
+      var core = crackGeometry(k.segs, 1.0, 0.02);
+      geos.push(halo, core);
+      g.add(new THREE.Mesh(halo, crackHaloMat));
+      g.add(new THREE.Mesh(core, crackCoreMat));
+      var hm = new THREE.Mesh(crackHoleGeo, crackCoreMat);
+      hm.position.set(k.x, 0.021, k.z);
+      hm.rotation.y = k.rot;
+      g.add(hm);
+      var hh = new THREE.Mesh(crackHoleGeo, crackHaloMat);
+      hh.position.set(k.x, 0.013, k.z);
+      hh.rotation.y = k.rot + 0.4;
+      hh.scale.set(1.9, 1, 1.9);
+      g.add(hh);
+    }
+    scene.add(g);
+    return { group: g, stars: stars, geos: geos, mats: mats, cx: cell.cx, cz: cell.cz };
+  }
+  function disposeCellMesh(cm) {
+    scene.remove(cm.group);
+    cm.geos.forEach(function (g) { g.dispose(); });
+    cm.mats.forEach(function (m) { m.dispose(); });
+  }
+  function clearCellMeshes() {
+    cellMeshes.forEach(disposeCellMesh);
+    cellMeshes.clear();
+  }
+  function syncCells() {
+    var ccx = Math.floor(px / CELL), ccz = Math.floor(pz / CELL);
+    cellMeshes.forEach(function (cm, k) {
+      if (Math.abs(cm.cx - ccx) > VIEW + 1 || Math.abs(cm.cz - ccz) > VIEW + 1) { disposeCellMesh(cm); cellMeshes.delete(k); }
+    });
+    for (var dx = -VIEW; dx <= VIEW; dx++) for (var dz = -VIEW; dz <= VIEW; dz++) {
+      var k = (ccx + dx) + ',' + (ccz + dz);
+      if (!cellMeshes.has(k)) cellMeshes.set(k, buildCellMesh(getCell(ccx + dx, ccz + dz)));
+    }
+  }
+
+  // ---------- skater ----------
+  function buildSkater() {
+    var root = new THREE.Group(), body = new THREE.Group();
+    root.add(body);
+    function M(c, o) { var p = { color: c, roughness: 0.6, metalness: 0.05 }; if (o) for (var k in o) p[k] = o[k]; return new THREE.MeshStandardMaterial(p); }
+    var jacket = M(0x2f7bff, { roughness: 0.5 }), pants = M(0x1c2436), skin = M(0xf1cdb8), hair = M(0xf3eee6, { roughness: 0.4 }),
+      pink = M(0xff5fa2), white = M(0xf4f6fa, { roughness: 0.3 }), blade = M(0xd0d8e4, { metalness: 0.9, roughness: 0.2 }), dark = M(0x111122);
+    function add(parent, geo, mat, x, y, z) { var m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; parent.add(m); return m; }
+    add(body, new THREE.CylinderGeometry(0.25, 0.32, 0.75, 14), jacket, 0, 1.27, 0);
+    add(body, new THREE.SphereGeometry(0.3, 14, 10), pants, 0, 0.92, 0).scale.set(1, 0.7, 0.9);
+    add(body, new THREE.SphereGeometry(0.27, 14, 10), jacket, 0, 1.6, 0).scale.set(1.15, 0.6, 0.9);
+    var scarf = add(body, new THREE.TorusGeometry(0.17, 0.07, 8, 16), pink, 0, 1.73, 0);
+    scarf.rotation.x = Math.PI / 2;
+    add(body, new THREE.BoxGeometry(0.1, 0.38, 0.04), pink, 0.08, 1.55, 0.22).rotation.z = 0.15;
+    add(body, new THREE.SphereGeometry(0.2, 18, 14), skin, 0, 1.93, 0);
+    add(body, new THREE.SphereGeometry(0.215, 18, 14), hair, 0, 1.96, 0.035);
+    add(body, new THREE.BoxGeometry(0.36, 0.55, 0.1), hair, 0, 1.66, 0.17);
+    add(body, new THREE.SphereGeometry(0.228, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), pink, 0, 1.99, 0.01);
+    add(body, new THREE.SphereGeometry(0.07, 10, 8), white, 0, 2.22, 0.01);
+    add(body, new THREE.SphereGeometry(0.025, 8, 6), dark, -0.07, 1.95, -0.185);
+    add(body, new THREE.SphereGeometry(0.025, 8, 6), dark, 0.07, 1.95, -0.185);
+    function leg(side) {
+      var p = new THREE.Group(); p.position.set(side * 0.13, 0.88, 0); body.add(p);
+      add(p, new THREE.CylinderGeometry(0.09, 0.08, 0.78, 10), pants, 0, -0.39, 0);
+      add(p, new THREE.BoxGeometry(0.16, 0.18, 0.32), white, 0, -0.78, -0.04);
+      add(p, new THREE.BoxGeometry(0.03, 0.05, 0.44), blade, 0, -0.885, -0.04);
+      return p;
+    }
+    function arm(side) {
+      var p = new THREE.Group(); p.position.set(side * 0.33, 1.55, 0); body.add(p);
+      add(p, new THREE.CylinderGeometry(0.07, 0.06, 0.6, 10), jacket, 0, -0.3, 0);
+      add(p, new THREE.SphereGeometry(0.08, 10, 8), pink, 0, -0.62, 0);
+      return p;
+    }
+    var o = { root: root, body: body, legL: leg(-1), legR: leg(1), armL: arm(-1), armR: arm(1) };
+    scene.add(root);
+    return o;
+  }
+  var sk = buildSkater();
+
+  // ---------- hole (for falling through) ----------
+  var hole = new THREE.Group();
+  (function () {
+    var water = new THREE.Mesh(new THREE.CircleGeometry(1.25, 20), new THREE.MeshStandardMaterial({ color: 0x031020, roughness: 0.05, metalness: 0.6 }));
+    water.rotation.x = -Math.PI / 2; water.position.y = 0.025;
+    hole.add(water);
+    var rim = new THREE.Mesh(new THREE.RingGeometry(1.2, 1.7, 20), new THREE.MeshBasicMaterial({ color: 0xe6f4ff, transparent: true, opacity: 0.45, depthWrite: false }));
+    rim.rotation.x = -Math.PI / 2; rim.position.y = 0.022;
+    hole.add(rim);
+    var r = mulberry32(99);
+    var shardMat = new THREE.MeshStandardMaterial({ color: 0xcfe6fa, roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.9 });
+    for (var i = 0; i < 12; i++) {
+      var a = i / 12 * Math.PI * 2 + r() * 0.3, d = 1.15 + r() * 0.5;
+      var m = new THREE.Mesh(new THREE.BoxGeometry(0.3 + r() * 0.4, 0.06, 0.2 + r() * 0.3), shardMat);
+      m.position.set(Math.cos(a) * d, 0.04, Math.sin(a) * d);
+      m.rotation.set((r() - 0.5) * 0.7, r() * 3, (r() - 0.5) * 0.7);
+      hole.add(m);
+    }
+  })();
+  hole.visible = false;
+  scene.add(hole);
+
+  // ---------- trails ----------
+  function makeTrail() {
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+    var l = new THREE.Line(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false }));
+    l.frustumCulled = false;
+    scene.add(l);
+    return l;
+  }
+  var lineL = makeTrail(), lineR = makeTrail();
+
+  // ---------- bursts ----------
+  var BURST_N = 30;
+  var burstPool = [];
+  for (var bi = 0; bi < 8; bi++) {
+    var bg = new THREE.BufferGeometry();
+    bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BURST_N * 3), 3));
+    var bp = new THREE.Points(bg, new THREE.PointsMaterial({ size: 0.22, map: glowTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, color: 0xffd860 }));
+    bp.frustumCulled = false; bp.visible = false;
+    scene.add(bp);
+    burstPool.push(bp);
+  }
+
+  // ---------- game state ----------
+  var px = 0, pz = 0, py = 0, heading = 0, steer = 0, speed = 9, dist = 0, stride = 0, runTime = 0, simTime = 0;
+  var state = 'skating', fallT = 0, score = 0, best = 0;
+  var camX = 0, camY = 0, camZ = 0, lookX = 0, lookY = 0, lookZ = 0;
+  var trailL = [], trailR = [], trailTick = 0;
+  var bursts = [], burstId = 0;
+  var collected = new Set();
+  var apTimer = 0, apSteer = 0;
+  var holeX = 0, holeZ = 0;
+  var autopilot = DEMO;
+  var baseSeed = DEMO ? DEMO_SEED : (Date.now() & 0xffffff);
+  var runIndex = 0;
+  var keys = { left: false, right: false };
+
+  function resetGame(seed) {
+    if (seed !== worldSeed) { worldSeed = seed; cellCache.clear(); clearCellMeshes(); }
+    collected.clear();
+    px = 0; pz = 0; py = 0; heading = 0; steer = 0; speed = 9; dist = 0; stride = 0; runTime = 0;
+    state = 'skating'; fallT = 0; score = 0;
+    trailL.length = 0; trailR.length = 0; trailTick = 0;
+    bursts.length = 0; apTimer = 0; apSteer = 0;
+    updateCamera(true);
+  }
+  function restart() {
+    runIndex++;
+    resetGame(baseSeed + runIndex * 7919);
+  }
+
+  function updateCamera(snap) {
+    var fx = -Math.sin(heading), fz = -Math.cos(heading);
+    var tx, ty, tz, lx, ly, lz;
+    if (state === 'skating') {
+      tx = px - fx * 7.5; ty = 3.5; tz = pz - fz * 7.5;
+      lx = px + fx * 6; ly = 0.9; lz = pz + fz * 6;
+    } else {
+      tx = camX; ty = Math.min(5.5, camY + 0.01); tz = camZ;
+      lx = holeX; ly = 0.2; lz = holeZ;
+    }
+    if (snap) { camX = tx; camY = ty; camZ = tz; lookX = lx; lookY = ly; lookZ = lz; return; }
+    var k = 1 - Math.exp(-DT * 3.2), kl = 1 - Math.exp(-DT * 5);
+    camX += (tx - camX) * k; camY += (ty - camY) * k; camZ += (tz - camZ) * k;
+    lookX += (lx - lookX) * kl; lookY += (ly - lookY) * kl; lookZ += (lz - lookZ) * kl;
+  }
+
+  function pushTrail() {
+    var fx = -Math.sin(heading), fz = -Math.cos(heading), rx = -fz, rz = fx;
+    var ph = stride * 0.55;
+    var oL = -(0.14 + 0.14 * Math.max(0, Math.sin(ph))), oR = 0.14 + 0.14 * Math.max(0, -Math.sin(ph));
+    trailL.push(px + rx * oL, pz + rz * oL);
+    trailR.push(px + rx * oR, pz + rz * oR);
+    if (trailL.length > TRAIL_MAX * 2) { trailL.splice(0, 2); trailR.splice(0, 2); }
+  }
+
+  function fallThrough() {
+    var fx = -Math.sin(heading), fz = -Math.cos(heading);
+    state = 'falling'; fallT = 0;
+    holeX = px + fx * 0.5; holeZ = pz + fz * 0.5;
+    if (score > best) best = score;
+    bursts.push({ x: holeX, y: 0.2, z: holeZ, t0: simTime, id: burstId++, color: 0xaee4ff });
+  }
+
+  function checkCollisions() {
+    var ccx = Math.floor(px / CELL), ccz = Math.floor(pz / CELL);
+    for (var dx = -1; dx <= 1; dx++) for (var dz = -1; dz <= 1; dz++) {
+      var c = getCell(ccx + dx, ccz + dz), i;
+      for (i = 0; i < c.stars.length; i++) {
+        var s = c.stars[i];
+        if (collected.has(s.key)) continue;
+        if (Math.hypot(s.x - px, s.z - pz) < 1.35) {
+          collected.add(s.key); score++;
+          if (score > best) best = score;
+          bursts.push({ x: s.x, y: 1.15, z: s.z, t0: simTime, id: burstId++, color: 0xffd860 });
+        }
+      }
+      for (i = 0; i < c.cracks.length; i++) {
+        var k = c.cracks[i];
+        if (Math.hypot(k.x - px, k.z - pz) > k.radius + 1) continue;
+        if (crackDist(k, px, pz) < 0) { fallThrough(); return; }
+      }
+    }
+  }
+
+  // ---------- autopilot ----------
+  function autopilotSteer() {
+    var fx = -Math.sin(heading), fz = -Math.cos(heading), rx = -fz, rz = fx;
+    var ccx = Math.floor(px / CELL), ccz = Math.floor(pz / CELL);
+    var near = [], starsN = [], i, j;
+    for (var dx = -2; dx <= 2; dx++) for (var dz = -2; dz <= 2; dz++) {
+      var c = getCell(ccx + dx, ccz + dz);
+      for (i = 0; i < c.cracks.length; i++) near.push(c.cracks[i]);
+      for (i = 0; i < c.stars.length; i++) if (!collected.has(c.stars[i].key)) starsN.push(c.stars[i]);
+    }
+    var target = null, bs = 1e9;
+    for (i = 0; i < starsN.length; i++) {
+      var s = starsN[i], ddx = s.x - px, ddz = s.z - pz;
+      var f = ddx * fx + ddz * fz, l = ddx * rx + ddz * rz;
+      if (f < 2 || f > 38) continue;
+      var a = Math.atan2(l, f);
+      if (Math.abs(a) > 1.1) continue;
+      var risky = false;
+      for (j = 0; j < near.length; j++) if (crackDist(near[j], s.x, s.z) < 0.9) { risky = true; break; }
+      if (risky) continue;
+      var sc = f + Math.abs(a) * 22;
+      if (sc < bs) { bs = sc; target = a; }
+    }
+    var want = target === null ? Math.sin(simTime * 0.31) * 0.35 : clamp(-target * 2.4, -1, 1);
+    var cands = [want, -1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1];
+    var bestC = want, bestCost = 1e9;
+    for (var ci = 0; ci < cands.length; ci++) {
+      var cs = cands[ci], h = heading, x = px, z = pz, st = steer, danger = 0;
+      for (var kk = 1; kk <= 14; kk++) {
+        var dt = 0.1;
+        st += (cs - st) * Math.min(1, dt * 7);
+        h += st * TURN * dt;
+        x += -Math.sin(h) * speed * dt; z += -Math.cos(h) * speed * dt;
+        var dm = 1e9;
+        for (j = 0; j < near.length; j++) {
+          var k = near[j];
+          if (Math.hypot(k.x - x, k.z - z) > k.radius + 3) continue;
+          var d = crackDist(k, x, z);
+          if (d < dm) dm = d;
+        }
+        if (dm < 0.35) danger += (15 - kk) * 12;
+        else if (dm < 1.2) danger += (15 - kk) * 1.5;
+      }
+      var cost = danger + Math.abs(cs - want) * 3;
+      if (cost < bestCost) { bestCost = cost; bestC = cs; }
+    }
+    return bestC;
+  }
+
+  // ---------- simulation step (fixed dt, no clock) ----------
+  function step() {
+    simTime += DT;
+    if (state === 'skating') {
+      runTime += DT;
+      var input;
+      if (autopilot) {
+        if (apTimer <= 0) { apSteer = autopilotSteer(); apTimer = 4; }
+        apTimer--;
+        input = apSteer;
+      } else {
+        input = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
+      }
+      steer += (input - steer) * Math.min(1, DT * 7);
+      speed = 9 + Math.min(7, runTime * 0.06);
+      heading += steer * TURN * DT;
+      px += -Math.sin(heading) * speed * DT;
+      pz += -Math.cos(heading) * speed * DT;
+      dist += speed * DT; stride += speed * DT;
+      if ((++trailTick) % 2 === 0) pushTrail();
+      checkCollisions();
+    } else {
+      fallT += DT;
+      if (fallT < 0.35) {
+        var sl = speed * DT * (1 - fallT / 0.35);
+        px += -Math.sin(heading) * sl; pz += -Math.cos(heading) * sl;
+      }
+      var kk = Math.min(1, DT * 4);
+      px += (holeX - px) * kk; pz += (holeZ - pz) * kk;
+      var ft = Math.max(0, fallT - 0.12);
+      py = Math.max(-4, -ft * ft * 3.2);
+      steer *= 0.95;
+      if (autopilot && fallT > 2.8) restart();
+    }
+    updateCamera(false);
+    for (var i = bursts.length - 1; i >= 0; i--) if (simTime - bursts[i].t0 > 1.2) bursts.splice(i, 1);
+  }
+
+  // ---------- render ----------
+  var elScore = document.getElementById('score'), elSub = document.getElementById('sub'),
+    elMsg = document.getElementById('msg'), elDemo = document.getElementById('demo'), elHelp = document.getElementById('help');
+  var lastMsg = null;
+  if (DEMO) elHelp.style.display = 'none';
+
+  function setMsg(html) { if (html !== lastMsg) { elMsg.innerHTML = html; lastMsg = html; } }
+
+  function render() {
+    syncCells();
+
+    cellMeshes.forEach(function (cm) {
+      for (var i = 0; i < cm.stars.length; i++) {
+        var so = cm.stars[i];
+        var vis = !collected.has(so.key);
+        so.group.visible = vis;
+        if (!vis) continue;
+        var y = 1.15 + Math.sin(simTime * 2.2 + so.phase) * 0.14;
+        so.mesh.rotation.y = simTime * 1.8 + so.phase;
+        so.mesh.position.y = y;
+        so.sprite.position.y = y;
+        var d = Math.hypot(so.x - camX, so.z - camZ);
+        var f = clamp(1 - (d - 55) / 40, 0, 1);
+        so.sprite.material.opacity = 0.85 * f * (0.85 + 0.15 * Math.sin(simTime * 5 + so.phase));
+        so.pool.material.opacity = 0.4 * f;
+      }
+    });
+
+    // skater pose
+    sk.root.position.set(px, py + 0.03, pz);
+    sk.root.rotation.y = heading;
+    var ph = stride * 0.55, sp = Math.sin(ph);
+    if (state === 'skating') {
+      sk.body.position.y = Math.abs(sp) * 0.04;
+      sk.body.rotation.set(-0.18, sp * 0.08, steer * 0.28);
+      sk.legL.rotation.set(-Math.max(0, sp) * 0.3, 0, -Math.max(0, sp) * 0.45);
+      sk.legR.rotation.set(-Math.max(0, -sp) * 0.3, 0, Math.max(0, -sp) * 0.45);
+      sk.armL.rotation.set(sp * 0.6, 0, -0.25);
+      sk.armR.rotation.set(-sp * 0.6, 0, 0.25);
+    } else {
+      var t = Math.min(1, fallT * 1.5), fl = Math.sin(simTime * 20) * 0.3;
+      sk.body.position.y = 0;
+      sk.body.rotation.set(-0.18 - t * 0.6, 0, steer * 0.28);
+      sk.legL.rotation.set(0.5 * t, 0, -0.3 * t);
+      sk.legR.rotation.set(-0.4 * t, 0, 0.3 * t);
+      sk.armL.rotation.set(0, 0, -2.4 * t + fl);
+      sk.armR.rotation.set(0, 0, 2.4 * t - fl);
+    }
+    sk.root.visible = py > -3.5;
+
+    hole.visible = state === 'falling';
+    if (hole.visible) hole.position.set(holeX, 0, holeZ);
+
+    lantern.position.set(px, 2.4, pz);
+    moonLight.position.set(px + MOON_DIR.x * 40, MOON_DIR.y * 40, pz + MOON_DIR.z * 40);
+    moonLight.target.position.set(px, 0, pz);
+    moonLight.target.updateMatrixWorld();
+
+    // trails
+    [[lineL, trailL], [lineR, trailR]].forEach(function (pair) {
+      var line = pair[0], arr = pair[1];
+      var n = arr.length / 2;
+      var pa = line.geometry.attributes.position.array, ca = line.geometry.attributes.color.array;
+      for (var i = 0; i < n; i++) {
+        pa[i * 3] = arr[i * 2]; pa[i * 3 + 1] = 0.03; pa[i * 3 + 2] = arr[i * 2 + 1];
+        var c = (i / Math.max(1, n)) * 0.55;
+        ca[i * 3] = c * 0.8; ca[i * 3 + 1] = c * 0.9; ca[i * 3 + 2] = c;
+      }
+      line.geometry.setDrawRange(0, n);
+      line.geometry.attributes.position.needsUpdate = true;
+      line.geometry.attributes.color.needsUpdate = true;
+    });
+
+    // bursts
+    for (var b = 0; b < burstPool.length; b++) {
+      var pts = burstPool[b], bu = bursts[bursts.length - 1 - b];
+      if (!bu) { pts.visible = false; continue; }
+      pts.visible = true;
+      var age = simTime - bu.t0, r = mulberry32(bu.id * 977 + 13);
+      var arr = pts.geometry.attributes.position.array;
+      for (var j = 0; j < BURST_N; j++) {
+        var th = r() * Math.PI * 2, up = r(), spd = 2 + r() * 3;
+        arr[j * 3] = bu.x + Math.cos(th) * spd * age;
+        arr[j * 3 + 1] = Math.max(0.05, bu.y + up * 3.5 * age - 3 * age * age);
+        arr[j * 3 + 2] = bu.z + Math.sin(th) * spd * age;
+      }
+      pts.geometry.attributes.position.needsUpdate = true;
+      pts.material.color.setHex(bu.color);
+      pts.material.opacity = clamp(1 - age / 1.2, 0, 1);
+    }
+
+    // snow
+    var sa = snowGeo.attributes.position.array;
+    for (var s = 0; s < SNOW; s++) {
+      var sx = snowBase[s * 3] + Math.sin(simTime * 0.7 + s) * 0.6;
+      var sz = snowBase[s * 3 + 2] + Math.cos(simTime * 0.5 + s * 1.3) * 0.6;
+      sa[s * 3] = camX - 30 + mod(sx - (camX - 30), 60);
+      sa[s * 3 + 1] = mod(snowBase[s * 3 + 1] - simTime * 1.1, 24);
+      sa[s * 3 + 2] = camZ - 30 + mod(sz - (camZ - 30), 60);
+    }
+    snowGeo.attributes.position.needsUpdate = true;
+
+    ice.position.set(Math.round(px / 10) * 10, 0, Math.round(pz / 10) * 10);
+    skyGroup.position.set(camX, camY, camZ);
+    trees.position.set(camX, 0, camZ);
+    auroraMat.uniforms.uTime.value = simTime;
+
+    camera.position.set(camX, camY, camZ);
+    camera.lookAt(lookX, lookY, lookZ);
+
+    // HUD
+    elScore.textContent = '★ ' + score;
+    elSub.textContent = 'best ' + best + ' · ' + Math.floor(dist) + ' m';
+    if (state === 'falling' && fallT > 0.9) {
+      setMsg('<h1>You fell through the ice!</h1><p>&#9733; ' + score + ' stars &middot; best ' + best + '</p><p>' +
+        (DEMO ? 'autopilot restarting&hellip;' : 'Press SPACE to restart') + '</p>');
+    } else if (!DEMO && state === 'skating' && runTime < 3.5) {
+      setMsg('<h1>Night Skate</h1><p>Steer with &larr; &rarr; or A / D</p><p>Collect the glowing stars. Stay off the cracks.</p>');
+    } else {
+      setMsg('');
+    }
+    if (DEMO) elDemo.textContent = 'DEMO · autopilot · t = ' + demoT.toFixed(2) + ' s';
+
+    renderer.render(scene, camera);
+  }
+
+  // ---------- input ----------
+  window.addEventListener('keydown', function (e) {
+    var k = e.key;
+    if (k === 'ArrowLeft' || k === 'a' || k === 'A') { keys.left = true; e.preventDefault(); }
+    else if (k === 'ArrowRight' || k === 'd' || k === 'D') { keys.right = true; e.preventDefault(); }
+    else if (k === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      if (!DEMO && state === 'falling' && fallT > 0.6) restart();
+    }
+  });
+  window.addEventListener('keyup', function (e) {
+    var k = e.key;
+    if (k === 'ArrowLeft' || k === 'a' || k === 'A') keys.left = false;
+    else if (k === 'ArrowRight' || k === 'd' || k === 'D') keys.right = false;
+  });
+  window.addEventListener('blur', function () { keys.left = keys.right = false; });
+
+  window.addEventListener('resize', function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    if (DEMO) render();
+  });
+
+  // ---------- run ----------
+  function runDemo(t) {
+    simTime = 0; runIndex = 0; best = 0; burstId = 0;
+    worldSeed = null;
+    resetGame(DEMO_SEED);
+    var n = Math.round(t / DT);
+    for (var i = 0; i < n; i++) step();
+    render();
+  }
+
+  window.addEventListener('hashchange', function () {
+    var t = parseT();
+    if (t !== null && DEMO) { demoT = t; runDemo(t); }
+    else location.reload();
+  });
+
+  if (DEMO) {
+    runDemo(demoT);
+  } else {
+    resetGame(baseSeed);
+    var last = null, acc = 0;
+    var frame = function (now) {
+      if (last === null) last = now;
+      var d = (now - last) / 1000; last = now;
+      if (d > 0.25) d = 0.25;
+      acc += d;
+      while (acc >= DT) { step(); acc -= DT; }
+      render();
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Night Skate</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #050a16; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #eaf2ff; user-select: none; -webkit-user-select: none; }
+  #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #vig { position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 55%, rgba(0,0,0,0) 55%, rgba(0,2,10,0.55) 100%); }
+  #hud { position: fixed; left: 28px; top: 20px; pointer-events: none; text-shadow: 0 2px 12px rgba(0,0,0,0.7); }
+  #score { font-size: 46px; font-weight: 800; letter-spacing: 1px; transform-origin: left center; }
+  #star { color: #ffd84a; text-shadow: 0 0 18px rgba(255,200,60,0.9); }
+  #dist { font-size: 18px; opacity: 0.75; margin-top: 2px; padding-left: 4px; }
+  #best { position: fixed; right: 28px; top: 28px; font-size: 18px; opacity: 0.75; pointer-events: none; text-shadow: 0 2px 12px rgba(0,0,0,0.7); }
+  #hint { position: fixed; left: 0; right: 0; bottom: 34px; text-align: center; font-size: 19px; pointer-events: none;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.8); opacity: 0; }
+  #hint b { display: inline-block; padding: 1px 9px; margin: 0 2px; border: 1px solid rgba(220,235,255,0.6); border-radius: 6px; font-weight: 600; }
+  #over { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none; text-align: center; background: radial-gradient(ellipse at center, rgba(2,6,16,0.55) 0%, rgba(2,6,16,0.1) 70%); }
+  #over h1 { font-size: 52px; margin: 0 0 10px; font-weight: 800; text-shadow: 0 0 30px rgba(120,190,255,0.7), 0 3px 14px rgba(0,0,0,0.8); }
+  #over p { font-size: 24px; margin: 6px 0; text-shadow: 0 2px 12px rgba(0,0,0,0.8); }
+  #over .k { margin-top: 18px; font-size: 20px; opacity: 0.9; }
+  #over .k b { display: inline-block; padding: 2px 12px; border: 1px solid rgba(220,235,255,0.7); border-radius: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="vig"></div>
+<div id="hud">
+  <div id="score"><span id="star">&#9733;</span> <span id="n">0</span></div>
+  <div id="dist">0 m</div>
+</div>
+<div id="best"></div>
+<div id="hint"><b>&larr;</b><b>&rarr;</b> or <b>A</b><b>D</b> to steer &nbsp;&middot;&nbsp; collect the stars &nbsp;&middot;&nbsp; avoid the cracks</div>
+<div id="over">
+  <h1>You fell through the ice</h1>
+  <p id="final"></p>
+  <p class="k">Press <b>SPACE</b> to skate again</p>
+</div>
+<script src="../../_lib/three-r128.min.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ---------------------------------------------------------------- constants
+var STEP = 1 / 60;        // fixed simulation step (seconds)
+var CELL = 14;            // world grid cell size
+var VR = 7;               // visible radius in cells
+var MAXT = 1.7;           // max turn rate (rad/s)
+var CARELESS_T = 38;      // demo: seconds into a run when the autopilot gets careless
+var FALL_HOLD = 3.2;      // demo: seconds shown after a fall before restarting
+var FOG = 0x0b1830;
+var TRAIL_N = 150;
+
+// ---------------------------------------------------------------- helpers
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash3(i, j, s) {
+  var h = Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ Math.imul(s, 2246822519);
+  h = Math.imul(h ^ h >>> 13, 1274126177);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mod(a, n) { return ((a % n) + n) % n; }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function distSeg(px, pz, x1, z1, x2, z2) {
+  var dx = x2 - x1, dz = z2 - z1, l = dx * dx + dz * dz;
+  var t = l > 0 ? ((px - x1) * dx + (pz - z1) * dz) / l : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  var ex = px - (x1 + dx * t), ez = pz - (z1 + dz * t);
+  return Math.sqrt(ex * ex + ez * ez);
+}
+
+// ---------------------------------------------------------------- world (pure, seeded per cell)
+var crackCache = new Map(), cellCache = new Map(), cacheSeed = null;
+function useSeed(seed) {
+  if (seed !== cacheSeed) { crackCache.clear(); cellCache.clear(); cacheSeed = seed; }
+}
+function crackAt(seed, i, j) {
+  useSeed(seed);
+  var key = i + ',' + j;
+  if (crackCache.has(key)) return crackCache.get(key);
+  var r = mulberry32(hash3(i, j, seed));
+  var x0 = i * CELL, z0 = j * CELL, mx = x0 + CELL / 2, mz = z0 + CELL / 2;
+  var d = Math.sqrt(mx * mx + mz * mz);
+  var pc = 0.22 + Math.min(0.3, d / 1200);
+  var crack = null;
+  if (d > 32 && r() < pc) {
+    var cx = x0 + CELL * (0.25 + 0.5 * r()), cz = z0 + CELL * (0.25 + 0.5 * r());
+    var ang = r() * Math.PI * 2, L = 5 + r() * 5;
+    var ux = Math.cos(ang), uz = Math.sin(ang), nx = -uz, nz = ux;
+    var n = 6 + Math.floor(r() * 3), pts = [], segs = [], k;
+    for (k = 0; k <= n; k++) {
+      var t = k / n - 0.5, off = (k === 0 || k === n) ? 0 : (r() - 0.5) * 1.5;
+      pts.push([cx + ux * t * L + nx * off, cz + uz * t * L + nz * off]);
+    }
+    for (k = 0; k < n; k++) {
+      var taper = 0.55 + 0.45 * Math.sin(Math.PI * (k + 0.5) / n);
+      segs.push([pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], 0.42 * taper]);
+    }
+    var nb = 2 + Math.floor(r() * 2);
+    for (var b = 0; b < nb; b++) {
+      var p = pts[1 + Math.floor(r() * (n - 1))];
+      var ba = ang + (r() < 0.5 ? -1 : 1) * (0.5 + r() * 0.7), bl = 1.4 + r() * 2;
+      var bx = p[0], bz = p[1];
+      for (var q = 0; q < 2; q++) {
+        var a2 = ba + (r() - 0.5) * 0.7;
+        var ex = bx + Math.cos(a2) * bl / 2, ez = bz + Math.sin(a2) * bl / 2;
+        segs.push([bx, bz, ex, ez, q ? 0.12 : 0.2]);
+        bx = ex; bz = ez;
+      }
+    }
+    crack = { x: cx, z: cz, r: L / 2 + 4.5, segs: segs };
+  }
+  crackCache.set(key, crack);
+  return crack;
+}
+function cellData(seed, i, j) {
+  useSeed(seed);
+  var key = i + ',' + j, c = cellCache.get(key);
+  if (c) return c;
+  c = { key: key, i: i, j: j, crack: crackAt(seed, i, j), star: null };
+  var r = mulberry32(hash3(i, j, seed + 7919));
+  var roll = r(), sx = i * CELL + 2 + r() * (CELL - 4), sz = j * CELL + 2 + r() * (CELL - 4), ph = r() * 6.2832;
+  if (roll < 0.55 && sx * sx + sz * sz > 64) {
+    var ok = true;
+    for (var di = -1; di <= 1 && ok; di++) for (var dj = -1; dj <= 1 && ok; dj++) {
+      var cr = crackAt(seed, i + di, j + dj);
+      if (!cr) continue;
+      for (var s = 0; s < cr.segs.length; s++) {
+        var g = cr.segs[s];
+        if (distSeg(sx, sz, g[0], g[1], g[2], g[3]) < 2.2) { ok = false; break; }
+      }
+    }
+    if (ok) c.star = { id: key, x: sx, z: sz, ph: ph };
+  }
+  cellCache.set(key, c);
+  return c;
+}
+
+// ---------------------------------------------------------------- simulation (fixed step, no clock)
+function resetRun(G) {
+  G.rs = (G.seed + G.run * 1013) | 0;
+  G.x = 0; G.z = 0; G.h = 0; G.tv = 0; G.camH = 0; G.speed = 9;
+  G.stars = 0; G.dist = 0; G.state = 'play'; G.runStep = 0; G.fallStep = 0;
+  G.collected = new Set(); G.bursts = []; G.trail = [];
+  G.lastCollect = -9999; G.ap = 0; G.fx = 0; G.fz = 0;
+}
+function newGame(seed) {
+  var G = { seed: seed | 0, run: 0, step: 0, best: 0 };
+  resetRun(G);
+  return G;
+}
+function stepGame(G, steer) {
+  var dt = STEP;
+  G.step++;
+  if (G.state === 'play') {
+    G.runStep++;
+    var T = G.runStep * dt;
+    G.speed = Math.min(22, 9 + T * 0.14);
+    G.tv += (steer * MAXT - G.tv) * Math.min(1, dt * 6);
+    G.h += G.tv * dt;
+    G.x += Math.sin(G.h) * G.speed * dt;
+    G.z -= Math.cos(G.h) * G.speed * dt;
+    G.dist += G.speed * dt;
+    G.camH += (G.h - G.camH) * Math.min(1, dt * 3.5);
+    if (G.runStep % 2 === 0) {
+      G.trail.push(G.x, G.z, G.h);
+      if (G.trail.length > TRAIL_N * 3) G.trail.splice(0, 3);
+    }
+    var ci = Math.floor(G.x / CELL), cj = Math.floor(G.z / CELL), fell = false;
+    for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) {
+      var c = cellData(G.rs, ci + i, cj + j);
+      if (c.star && !G.collected.has(c.star.id)) {
+        var sx = c.star.x - G.x, sz = c.star.z - G.z;
+        if (sx * sx + sz * sz < 1.35 * 1.35) {
+          G.collected.add(c.star.id); G.stars++;
+          G.bursts.push({ x: c.star.x, z: c.star.z, s: G.step });
+          G.lastCollect = G.step;
+        }
+      }
+      var cr = c.crack;
+      if (cr && !fell) {
+        var dx = G.x - cr.x, dz = G.z - cr.z;
+        if (dx * dx + dz * dz < cr.r * cr.r) {
+          for (var s = 0; s < cr.segs.length; s++) {
+            var g = cr.segs[s];
+            if (distSeg(G.x, G.z, g[0], g[1], g[2], g[3]) < g[4] / 2 + 0.22) { fell = true; break; }
+          }
+        }
+      }
+    }
+    if (fell) {
+      G.state = 'fall'; G.fallStep = 0; G.fx = G.x; G.fz = G.z;
+      if (G.stars > G.best) G.best = G.stars;
+    }
+  } else {
+    G.fallStep++;
+    G.tv *= 0.9;
+    G.camH += 0.25 * dt;
+  }
+  while (G.bursts.length && G.step - G.bursts[0].s > 40) G.bursts.shift();
+}
+
+// simple look-ahead autopilot for the demo
+var CANDS = [[0, 0], [-1, 0.3], [1, 0.3], [-1, 0.7], [1, 0.7], [-1, 1.2], [1, 1.2]];
+function autopilot(G) {
+  var ci = Math.floor(G.x / CELL), cj = Math.floor(G.z / CELL), cracks = [], stars = [], i, j, c;
+  var fx = Math.sin(G.h), fz = -Math.cos(G.h);
+  for (i = -3; i <= 3; i++) for (j = -3; j <= 3; j++) {
+    c = cellData(G.rs, ci + i, cj + j);
+    if (c.crack) cracks.push(c.crack);
+    if (c.star && !G.collected.has(c.star.id) && (c.star.x - G.x) * fx + (c.star.z - G.z) * fz > -2) stars.push(c.star);
+  }
+  var careless = G.runStep * STEP > CARELESS_T;
+  var best = -1e12, bestS = 0, v = G.speed, dt = 0.05, N = 40;
+  for (var k = 0; k < CANDS.length; k++) {
+    var s = CANDS[k][0], dur = CANDS[k][1];
+    var px = G.x, pz = G.z, h = G.h, tv = G.tv, minC = 1e9, tHit = -1, minS = 1e9, bonus = 0, got = {};
+    for (var n = 1; n <= N; n++) {
+      var t = n * dt;
+      tv += ((t <= dur ? s * MAXT : 0) - tv) * Math.min(1, dt * 6);
+      h += tv * dt; px += Math.sin(h) * v * dt; pz -= Math.cos(h) * v * dt;
+      for (var a = 0; a < cracks.length; a++) {
+        var cr = cracks[a], dx = px - cr.x, dz = pz - cr.z, rr = cr.r + 3;
+        if (dx * dx + dz * dz > rr * rr) continue;
+        for (var b = 0; b < cr.segs.length; b++) {
+          var sg = cr.segs[b], d = distSeg(px, pz, sg[0], sg[1], sg[2], sg[3]);
+          if (d < minC) minC = d;
+          if (d < 1.15 && tHit < 0) tHit = t;
+        }
+      }
+      for (a = 0; a < stars.length; a++) {
+        var st = stars[a], ex = px - st.x, ez = pz - st.z, d2 = Math.sqrt(ex * ex + ez * ez);
+        if (d2 < minS) minS = d2;
+        if (d2 < 1 && !got[st.id]) { got[st.id] = 1; bonus += 45 - t * 10; }
+      }
+    }
+    var score;
+    if (careless) score = tHit >= 0 ? 1000 - tHit * 100 : -Math.min(minC, 500);
+    else score = bonus - (tHit >= 0 ? 1000 + (2 - tHit) * 300 : 0) - (minC < 2.8 ? (2.8 - minC) * 14 : 0) -
+      Math.min(minS, 30) * 0.7 - dur * 1.5;
+    if (score > best) { best = score; bestS = s; }
+  }
+  return bestS;
+}
+function demoStep(G) {
+  if (G.state === 'fall' && G.fallStep * STEP >= FALL_HOLD) { G.run++; resetRun(G); }
+  if (G.state === 'play') {
+    if (G.runStep % 6 === 0) G.ap = autopilot(G);
+    stepGame(G, G.ap);
+  } else stepGame(G, 0);
+}
+
+// ---------------------------------------------------------------- renderer + scene
+var canvas = document.getElementById('c');
+var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setClearColor(FOG, 1);
+var scene = new THREE.Scene();
+scene.fog = new THREE.Fog(FOG, 28, 95);
+var camera = new THREE.PerspectiveCamera(62, 1, 0.5, 1500);
+
+function mkCanvas(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+// textures (all seeded, so every load looks the same)
+function glowTexture() {
+  var c = mkCanvas(128, 128), g = c.getContext('2d');
+  var gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(0.18, 'rgba(255,255,255,0.6)');
+  gr.addColorStop(0.5, 'rgba(255,255,255,0.14)');
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+function moonTexture() {
+  var c = mkCanvas(256, 256), g = c.getContext('2d'), r = mulberry32(77);
+  var gr = g.createRadialGradient(128, 128, 40, 128, 128, 128);
+  gr.addColorStop(0, 'rgba(170,200,255,0.5)');
+  gr.addColorStop(0.35, 'rgba(120,160,240,0.16)');
+  gr.addColorStop(1, 'rgba(100,140,230,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+  g.fillStyle = '#f3f6ff'; g.beginPath(); g.arc(128, 128, 46, 0, 6.2832); g.fill();
+  g.save(); g.beginPath(); g.arc(128, 128, 46, 0, 6.2832); g.clip();
+  for (var i = 0; i < 9; i++) {
+    g.fillStyle = 'rgba(150,165,200,' + (0.25 + r() * 0.3) + ')';
+    g.beginPath(); g.arc(90 + r() * 76, 90 + r() * 76, 4 + r() * 11, 0, 6.2832); g.fill();
+  }
+  g.restore();
+  return new THREE.CanvasTexture(c);
+}
+function iceTexture() {
+  var c = mkCanvas(512, 512), g = c.getContext('2d'), r = mulberry32(4242), i;
+  g.fillStyle = '#b7c9de'; g.fillRect(0, 0, 512, 512);
+  for (i = 0; i < 70; i++) {
+    var x = r() * 512, y = r() * 512, rad = 30 + r() * 90, light = r() < 0.5;
+    var gr = g.createRadialGradient(x, y, 0, x, y, rad);
+    gr.addColorStop(0, light ? 'rgba(255,255,255,0.16)' : 'rgba(40,70,110,0.20)');
+    gr.addColorStop(1, light ? 'rgba(255,255,255,0)' : 'rgba(40,70,110,0)');
+    g.fillStyle = gr;
+    for (var ox = -512; ox <= 512; ox += 512) for (var oy = -512; oy <= 512; oy += 512) {
+      g.save(); g.translate(ox, oy); g.fillRect(x - rad, y - rad, rad * 2, rad * 2); g.restore();
+    }
+  }
+  for (i = 0; i < 170; i++) {
+    g.strokeStyle = 'rgba(255,255,255,' + (0.08 + r() * 0.2) + ')';
+    g.lineWidth = 0.6 + r() * 0.9;
+    g.beginPath();
+    g.arc(r() * 512, r() * 512, 40 + r() * 260, r() * 6.28, r() * 6.28 + 0.2 + r() * 0.7);
+    g.stroke();
+  }
+  for (i = 0; i < 500; i++) {
+    g.fillStyle = 'rgba(255,255,255,' + (0.1 + r() * 0.25) + ')';
+    g.fillRect(r() * 512, r() * 512, 1 + r() * 1.5, 1 + r() * 1.5);
+  }
+  var t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(20, 20);
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+function treeTexture() {
+  var W = 1024, H = 128, c = mkCanvas(W, H), g = c.getContext('2d'), r = mulberry32(909);
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = '#040a14';
+  function hill(x) { return 46 + 16 * Math.sin(x / W * 6.2832) + 9 * Math.sin(x / W * 6.2832 * 3 + 1.3) + 5 * Math.sin(x / W * 6.2832 * 7 + 0.4); }
+  g.beginPath(); g.moveTo(0, H);
+  for (var x = 0; x <= W; x += 4) g.lineTo(x, H - hill(x));
+  g.lineTo(W, H); g.closePath(); g.fill();
+  for (x = 0; x < W; x += 5 + r() * 9) {
+    var base = H - hill(x) + 3, th = 10 + r() * 24, tw = 3 + r() * 4;
+    g.beginPath(); g.moveTo(x - tw, base); g.lineTo(x, base - th); g.lineTo(x + tw, base); g.closePath(); g.fill();
+  }
+  var t = new THREE.CanvasTexture(c);
+  t.wrapS = THREE.RepeatWrapping; t.repeat.set(4, 1);
+  return t;
+}
+function auroraTexture() {
+  var W = 256, H = 128, c = mkCanvas(W, H), g = c.getContext('2d');
+  for (var x = 0; x < W; x++) {
+    var u = x / W * 6.2832;
+    var I = 0.5 + 0.25 * Math.sin(u * 2 + 0.5) + 0.15 * Math.sin(u * 5 + 2) + 0.1 * Math.sin(u * 13 + 1) + 0.08 * Math.sin(u * 29);
+    I = clamp(I, 0, 1); I = I * I;
+    var gr = g.createLinearGradient(0, 0, 0, H);
+    gr.addColorStop(0, 'rgba(130,90,255,0)');
+    gr.addColorStop(0.4, 'rgba(70,220,200,' + (0.3 * I).toFixed(3) + ')');
+    gr.addColorStop(0.85, 'rgba(80,255,150,' + (0.95 * I).toFixed(3) + ')');
+    gr.addColorStop(1, 'rgba(80,255,150,0)');
+    g.fillStyle = gr; g.fillRect(x, 0, 1, H);
+  }
+  var t = new THREE.CanvasTexture(c);
+  t.wrapS = THREE.RepeatWrapping;
+  return t;
+}
+var glowTex = glowTexture();
+
+// lights
+scene.add(new THREE.HemisphereLight(0x4a6da8, 0x0a1424, 0.85));
+var MOON_DIR = new THREE.Vector3(-0.4, 0.45, -0.8).normalize();
+var moonLight = new THREE.DirectionalLight(0xcfdcff, 0.85);
+moonLight.position.copy(MOON_DIR).multiplyScalar(100);
+scene.add(moonLight);
+var lamp = new THREE.PointLight(0xa8d0ff, 0.9, 26, 2);
+scene.add(lamp);
+
+// ice
+var ice = new THREE.Mesh(
+  new THREE.PlaneGeometry(600, 600),
+  new THREE.MeshStandardMaterial({ color: 0x2a4d78, map: iceTexture(), roughness: 0.3, metalness: 0.0 })
+);
+ice.rotation.x = -Math.PI / 2;
+scene.add(ice);
+
+// sky (follows the camera)
+var sky = new THREE.Group();
+scene.add(sky);
+(function buildSky() {
+  var geo = new THREE.SphereGeometry(500, 32, 20), pos = geo.attributes.position, cols = [];
+  var hz = new THREE.Color(FOG), zen = new THREE.Color(0x02040c), tmp = new THREE.Color();
+  for (var i = 0; i < pos.count; i++) {
+    var t = Math.pow(clamp(pos.getY(i) / 500, 0, 1), 0.6);
+    tmp.copy(hz).lerp(zen, t); cols.push(tmp.r, tmp.g, tmp.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  var dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
+  dome.renderOrder = -10; sky.add(dome);
+
+  var r = mulberry32(31337), sp = [], sc = [];
+  for (i = 0; i < 900; i++) {
+    var y = 0.04 + 0.96 * r(), th = r() * 6.2832, rad = Math.sqrt(1 - y * y), b = 0.35 + 0.65 * r() * r();
+    sp.push(Math.cos(th) * rad * 470, y * 470, Math.sin(th) * rad * 470);
+    sc.push(b * 0.9, b * 0.95, b);
+  }
+  var sg = new THREE.BufferGeometry();
+  sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
+  sg.setAttribute('color', new THREE.Float32BufferAttribute(sc, 3));
+  var pts = new THREE.Points(sg, new THREE.PointsMaterial({ size: 1.9, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, depthWrite: false }));
+  pts.renderOrder = -9; sky.add(pts);
+
+  var moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTexture(), blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+  moon.position.copy(MOON_DIR).multiplyScalar(420); moon.scale.set(150, 150, 1); moon.renderOrder = -7;
+  sky.add(moon);
+
+  var trees = new THREE.Mesh(
+    new THREE.CylinderGeometry(440, 440, 40, 64, 1, true),
+    new THREE.MeshBasicMaterial({ map: treeTexture(), alphaTest: 0.5, side: THREE.BackSide, fog: false })
+  );
+  trees.position.y = 19; sky.add(trees);
+})();
+var auroraTex = auroraTexture(), auroras = [];
+function auroraBand(a0, a1, rad, y0, hh, op, wob) {
+  var N = 48, pos = [], uv = [], idx = [];
+  for (var k = 0; k <= N; k++) {
+    var a = a0 + (a1 - a0) * k / N, x = Math.sin(a) * rad, z = -Math.cos(a) * rad, yb = y0 + 18 * Math.sin(k * 0.45 + wob);
+    pos.push(x, yb, z, x, yb + hh, z);
+    uv.push(k / N * 2.5, 0, k / N * 2.5, 1);
+  }
+  for (k = 0; k < N; k++) { var i = k * 2; idx.push(i, i + 1, i + 2, i + 1, i + 3, i + 2); }
+  var g = new THREE.BufferGeometry();
+  g.setIndex(idx);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  var m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: auroraTex, transparent: true, blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide, depthWrite: false, fog: false, opacity: op }));
+  m.renderOrder = -8; m.userData.op = op; m.userData.wob = wob;
+  sky.add(m); auroras.push(m);
+}
+auroraBand(0.1, 2.0, 400, 70, 130, 0.5, 0);
+auroraBand(-2.6, -1.3, 410, 95, 110, 0.32, 2);
+
+// snow
+var SNOW_N = 500, snowBase = new Float32Array(SNOW_N * 3), snowGeo = new THREE.BufferGeometry();
+(function () {
+  var r = mulberry32(555);
+  for (var i = 0; i < SNOW_N; i++) { snowBase[i * 3] = r() * 60; snowBase[i * 3 + 1] = r() * 30; snowBase[i * 3 + 2] = r() * 60; }
+  snowGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(SNOW_N * 3), 3));
+})();
+var snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.13, sizeAttenuation: true, transparent: true, opacity: 0.75, depthWrite: false }));
+snow.frustumCulled = false; scene.add(snow);
+
+// skater
+var skater = new THREE.Group(), body = new THREE.Group(), upper = new THREE.Group();
+var legL = new THREE.Group(), legR = new THREE.Group(), armL = new THREE.Group(), armR = new THREE.Group(), scarfTail = new THREE.Group();
+(function buildSkater() {
+  function mat(c, rough) { return new THREE.MeshStandardMaterial({ color: c, roughness: rough === undefined ? 0.8 : rough }); }
+  function box(w, h, d, m, x, y, z, parent) {
+    var b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); b.position.set(x, y, z); parent.add(b); return b;
+  }
+  var coat = mat(0xe0404f), pants = mat(0x1d2540), boot = mat(0xeef2f8, 0.5), blade = new THREE.MeshStandardMaterial({ color: 0xc8d4e4, roughness: 0.2, metalness: 0.8 });
+  var skin = mat(0xf2c9a8), hat = mat(0x35cfe0), scarf = mat(0xffd24a), white = mat(0xffffff);
+  var HIP = 0.95;
+  [legL, legR].forEach(function (leg, i) {
+    var sx = i ? 0.12 : -0.12;
+    leg.position.set(sx, HIP, 0);
+    box(0.17, 0.78, 0.19, pants, 0, -0.39, 0, leg);
+    box(0.19, 0.15, 0.32, boot, 0, -0.8, -0.04, leg);
+    box(0.03, 0.06, 0.44, blade, 0, -0.9, -0.04, leg);
+    body.add(leg);
+  });
+  upper.position.set(0, HIP, 0); upper.rotation.x = -0.28; body.add(upper);
+  var torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 0.62, 12), coat);
+  torso.position.y = 0.31; upper.add(torso);
+  var head = new THREE.Mesh(new THREE.SphereGeometry(0.155, 16, 12), skin);
+  head.position.y = 0.8; upper.add(head);
+  var cap = new THREE.Mesh(new THREE.SphereGeometry(0.168, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
+  cap.position.y = 0.82; upper.add(cap);
+  var pom = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), white);
+  pom.position.y = 1.01; upper.add(pom);
+  var neck = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.17, 0.1, 12), scarf);
+  neck.position.y = 0.65; upper.add(neck);
+  scarfTail.position.set(0.06, 0.64, 0.13); upper.add(scarfTail);
+  box(0.11, 0.05, 0.5, scarf, 0, 0, 0.25, scarfTail);
+  [armL, armR].forEach(function (arm, i) {
+    arm.position.set(i ? 0.27 : -0.27, 0.56, 0);
+    box(0.11, 0.5, 0.11, coat, 0, -0.25, 0, arm);
+    var mit = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), white);
+    mit.position.y = -0.54; arm.add(mit);
+    upper.add(arm);
+  });
+  skater.add(body);
+  skater.rotation.order = 'YXZ';
+  scene.add(skater);
+})();
+
+// skate trails
+function mkTrail() {
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_N * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_N * 3), 3));
+  var l = new THREE.Line(g, new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false }));
+  l.frustumCulled = false; scene.add(l); return l;
+}
+var trailL = mkTrail(), trailR = mkTrail();
+
+// cracks + stars visuals
+var crackMat = new THREE.MeshBasicMaterial({ color: 0x01040a, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+var frostMat = new THREE.MeshBasicMaterial({ color: 0xb4d6f5, side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+function quadsGeom(segs, extra, y) {
+  var pos = new Float32Array(segs.length * 18), o = 0;
+  for (var i = 0; i < segs.length; i++) {
+    var s = segs[i], dx = s[2] - s[0], dz = s[3] - s[1], len = Math.sqrt(dx * dx + dz * dz) || 1;
+    dx /= len; dz /= len;
+    var hw = s[4] / 2 + extra, ext = hw * 0.6, nx = -dz * hw, nz = dx * hw;
+    var ax = s[0] - dx * ext, az = s[1] - dz * ext, bx = s[2] + dx * ext, bz = s[3] + dz * ext;
+    var v = [ax + nx, az + nz, ax - nx, az - nz, bx + nx, bz + nz, ax - nx, az - nz, bx - nx, bz - nz, bx + nx, bz + nz];
+    for (var k = 0; k < 6; k++) { pos[o++] = v[k * 2]; pos[o++] = y; pos[o++] = v[k * 2 + 1]; }
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  return g;
+}
+var starGeo = (function () {
+  var sh = new THREE.Shape();
+  for (var i = 0; i < 10; i++) {
+    var a = Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 0.21 : 0.5;
+    if (i === 0) sh.moveTo(Math.cos(a) * r, Math.sin(a) * r); else sh.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  sh.closePath();
+  var g = new THREE.ExtrudeGeometry(sh, { depth: 0.12, bevelEnabled: true, bevelSize: 0.04, bevelThickness: 0.04, bevelSegments: 1 });
+  g.center();
+  return g;
+})();
+var starMat = new THREE.MeshStandardMaterial({ color: 0xffd84a, emissive: 0xffb300, emissiveIntensity: 0.95, roughness: 0.4 });
+var haloMat = new THREE.SpriteMaterial({ map: glowTex, color: 0xffc94a, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+var discGeo = new THREE.PlaneGeometry(1, 1);
+var discMat = new THREE.MeshBasicMaterial({ map: glowTex, color: 0xffb040, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.55,
+  depthWrite: false, fog: false });
+
+var vis = new Map(), visSeed = null, visKey = '';
+function makeCell(c) {
+  var v = { i: c.i, j: c.j, group: new THREE.Group(), star: null, geoms: [] };
+  if (c.crack) {
+    var g1 = quadsGeom(c.crack.segs, 0.26, 0.02), g2 = quadsGeom(c.crack.segs, 0, 0.03);
+    v.geoms.push(g1, g2);
+    v.group.add(new THREE.Mesh(g1, frostMat));
+    v.group.add(new THREE.Mesh(g2, crackMat));
+  }
+  if (c.star) {
+    var sg = new THREE.Group();
+    sg.position.set(c.star.x, 0, c.star.z);
+    var mesh = new THREE.Mesh(starGeo, starMat), halo = new THREE.Sprite(haloMat), disc = new THREE.Mesh(discGeo, discMat);
+    disc.rotation.x = -Math.PI / 2; disc.position.y = 0.03;
+    sg.add(mesh); sg.add(halo); sg.add(disc);
+    v.group.add(sg);
+    v.star = { g: sg, mesh: mesh, halo: halo, disc: disc, data: c.star };
+  }
+  scene.add(v.group);
+  return v;
+}
+function dropCell(v) {
+  scene.remove(v.group);
+  for (var i = 0; i < v.geoms.length; i++) v.geoms[i].dispose();
+}
+function syncCells(G) {
+  var ci = Math.floor(G.x / CELL), cj = Math.floor(G.z / CELL), key = G.rs + ':' + ci + ',' + cj;
+  if (key === visKey) return;
+  visKey = key;
+  if (visSeed !== G.rs) { vis.forEach(dropCell); vis.clear(); visSeed = G.rs; }
+  vis.forEach(function (v, k) {
+    if (Math.abs(v.i - ci) > VR + 1 || Math.abs(v.j - cj) > VR + 1) { dropCell(v); vis.delete(k); }
+  });
+  for (var i = -VR; i <= VR; i++) for (var j = -VR; j <= VR; j++) {
+    var c = cellData(G.rs, ci + i, cj + j);
+    if ((c.crack || c.star) && !vis.has(c.key)) vis.set(c.key, makeCell(c));
+  }
+}
+
+// collect bursts
+var burstSprites = [];
+for (var bi = 0; bi < 5; bi++) {
+  var bs = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xfff0a0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, transparent: true }));
+  bs.visible = false; scene.add(bs); burstSprites.push(bs);
+}
+
+// hole + splash for the fall
+var hole = new THREE.Group();
+(function () {
+  var dark = new THREE.Mesh(new THREE.CircleGeometry(1, 11), new THREE.MeshBasicMaterial({ color: 0x01030a }));
+  dark.rotation.x = -Math.PI / 2; dark.position.y = 0.035; hole.add(dark);
+  var ring = new THREE.Mesh(new THREE.RingGeometry(0.98, 1.2, 11), new THREE.MeshBasicMaterial({ color: 0xc4e2ff, transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.04; hole.add(ring);
+  var segs = [];
+  for (var i = 0; i < 7; i++) {
+    var a = i * 0.9 + 0.3, m = a + 0.25 * Math.sin(i * 3.1), l = 1.7 + 0.6 * Math.sin(i * 1.7);
+    segs.push([Math.cos(a), Math.sin(a), Math.cos(m) * 1.5, Math.sin(m) * 1.5, 0.1]);
+    segs.push([Math.cos(m) * 1.5, Math.sin(m) * 1.5, Math.cos(a - 0.1) * (l + 0.5), Math.sin(a - 0.1) * (l + 0.5), 0.05]);
+  }
+  hole.add(new THREE.Mesh(quadsGeom(segs, 0.05, 0.03), frostMat));
+  hole.visible = false; scene.add(hole);
+})();
+var SPL_N = 18, splashGeo = new THREE.BufferGeometry();
+splashGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(SPL_N * 3), 3));
+var splash = new THREE.Points(splashGeo, new THREE.PointsMaterial({ color: 0xd4ecff, size: 0.16, sizeAttenuation: true, transparent: true, opacity: 0.9, depthWrite: false }));
+splash.frustumCulled = false; splash.visible = false; scene.add(splash);
+
+// ---------------------------------------------------------------- draw one frame from state
+var elN = document.getElementById('n'), elDist = document.getElementById('dist'), elBest = document.getElementById('best');
+var elScore = document.getElementById('score'), elHint = document.getElementById('hint'), elOver = document.getElementById('over'), elFinal = document.getElementById('final');
+
+function updTrail(line, G, side) {
+  var pos = line.geometry.attributes.position.array, col = line.geometry.attributes.color.array, tr = G.trail, n = tr.length / 3;
+  line.visible = n > 1;
+  if (n < 2) return;
+  for (var k = 0; k < TRAIL_N; k++) {
+    var e = Math.min(k, n - 1) * 3, h = tr[e + 2];
+    pos[k * 3] = tr[e] + Math.cos(h) * side; pos[k * 3 + 1] = 0.03; pos[k * 3 + 2] = tr[e + 1] + Math.sin(h) * side;
+    var a = k < n ? Math.pow(k / n, 1.5) * 0.5 : 0;
+    col[k * 3] = 0.6 * a; col[k * 3 + 1] = 0.8 * a; col[k * 3 + 2] = a;
+  }
+  line.geometry.attributes.position.needsUpdate = true;
+  line.geometry.attributes.color.needsUpdate = true;
+}
+
+function draw(G, isDemo) {
+  var gT = G.step * STEP, runT = G.runStep * STEP, falling = G.state === 'fall', f = G.fallStep * STEP, i;
+  syncCells(G);
+
+  // skater
+  var ph = G.dist * 0.42, sp = Math.sin(ph);
+  skater.position.set(G.x, falling ? -Math.min(2.4, f * f * 4) : 0, G.z);
+  skater.rotation.y = -G.h;
+  body.rotation.z = -G.tv * 0.22;
+  body.rotation.x = falling ? -Math.min(1.1, f * 2.6) : 0;
+  body.position.set(falling ? 0 : sp * 0.05, falling ? 0 : -0.03 * Math.abs(sp), 0);
+  var pl = Math.max(0, sp), pr = Math.max(0, -sp);
+  legL.rotation.z = -pl * 0.4; legL.rotation.x = -pl * 0.32;
+  legR.rotation.z = pr * 0.4; legR.rotation.x = -pr * 0.32;
+  if (falling) {
+    var fl = Math.sin(f * 22) * 0.3;
+    armL.rotation.x = -2.6 + fl; armR.rotation.x = -2.6 - fl; armL.rotation.z = -0.4; armR.rotation.z = 0.4;
+  } else {
+    armL.rotation.x = -sp * 0.6; armR.rotation.x = sp * 0.6; armL.rotation.z = -0.15; armR.rotation.z = 0.15;
+  }
+  scarfTail.rotation.x = 0.3 + 0.15 * Math.sin(gT * 9);
+  scarfTail.rotation.y = Math.sin(gT * 7) * 0.25 - G.tv * 0.3;
+
+  // camera
+  var cfx = Math.sin(G.camH), cfz = -Math.cos(G.camH), cd = 7.5 - (falling ? Math.min(2, f) : 0);
+  camera.position.set(G.x - cfx * cd, 3.6, G.z - cfz * cd);
+  camera.lookAt(G.x + cfx * 5, 1.1, G.z + cfz * 5);
+  lamp.position.set(G.x + Math.sin(G.h) * 2, 3, G.z - Math.cos(G.h) * 2);
+  ice.position.set(Math.round(G.x / 30) * 30, 0, Math.round(G.z / 30) * 30);
+  sky.position.set(camera.position.x, 0, camera.position.z);
+  auroraTex.offset.x = gT * 0.004;
+  for (i = 0; i < auroras.length; i++) auroras[i].material.opacity = auroras[i].userData.op * (0.75 + 0.25 * Math.sin(gT * 0.35 + auroras[i].userData.wob));
+
+  // snow
+  var sp3 = snowGeo.attributes.position.array, cx = camera.position.x, cz = camera.position.z;
+  for (i = 0; i < SNOW_N; i++) {
+    var sw = Math.sin(gT * 0.9 + i) * 0.4;
+    sp3[i * 3] = cx + mod(snowBase[i * 3] + gT * 0.6 + sw - cx, 60) - 30;
+    sp3[i * 3 + 1] = mod(snowBase[i * 3 + 1] - gT * (1.2 + (i % 5) * 0.15), 30);
+    sp3[i * 3 + 2] = cz + mod(snowBase[i * 3 + 2] - cz, 60) - 30;
+  }
+  snowGeo.attributes.position.needsUpdate = true;
+
+  // stars
+  vis.forEach(function (v) {
+    if (!v.star) return;
+    var s = v.star, d = s.data;
+    if (G.collected.has(d.id)) { s.g.visible = false; return; }
+    s.g.visible = true;
+    var dx = d.x - G.x, dz = d.z - G.z, fade = clamp((92 - Math.sqrt(dx * dx + dz * dz)) / 30, 0, 1);
+    var y = 1.0 + 0.15 * Math.sin(gT * 2.2 + d.ph), pulse = 1 + 0.12 * Math.sin(gT * 4 + d.ph);
+    s.mesh.position.y = y; s.mesh.rotation.y = gT * 1.8 + d.ph;
+    s.halo.position.y = y;
+    var hs = 2.8 * fade * pulse; s.halo.scale.set(hs, hs, 1);
+    var ds = 4.2 * fade * pulse; s.disc.scale.set(ds, ds, 1);
+  });
+
+  // bursts
+  for (i = 0; i < burstSprites.length; i++) {
+    var b = G.bursts[G.bursts.length - 1 - i], spr = burstSprites[i];
+    if (!b) { spr.visible = false; continue; }
+    var age = (G.step - b.s) * STEP;
+    if (age >= 0.5) { spr.visible = false; continue; }
+    spr.visible = true; spr.position.set(b.x, 1, b.z);
+    var bsz = 1.5 + age * 10; spr.scale.set(bsz, bsz, 1);
+    spr.material.opacity = 1 - age / 0.5;
+  }
+
+  // trails
+  updTrail(trailL, G, -0.13); updTrail(trailR, G, 0.13);
+
+  // hole + splash
+  hole.visible = falling; splash.visible = falling && f < 1.4;
+  if (falling) {
+    var hs2 = Math.min(1, f / 0.25) * 1.5;
+    hole.position.set(G.fx, 0, G.fz); hole.scale.set(hs2, 1, hs2); hole.rotation.y = G.h;
+    var pp = splashGeo.attributes.position.array;
+    for (i = 0; i < SPL_N; i++) {
+      var a = i * 2.4, sv = 1.5 + ((i * 37) % 10) / 10 * 2.5, vy = 3.2 + ((i * 53) % 10) / 10 * 3.2, yy = vy * f - 6 * f * f;
+      pp[i * 3] = G.fx + Math.cos(a) * sv * f; pp[i * 3 + 1] = yy > 0 ? yy : -5; pp[i * 3 + 2] = G.fz + Math.sin(a) * sv * f;
+    }
+    splashGeo.attributes.position.needsUpdate = true;
+  }
+
+  // HUD
+  elN.textContent = G.stars;
+  elDist.textContent = Math.floor(G.dist) + ' m';
+  elBest.textContent = G.best > 0 ? 'Best ★ ' + G.best : '';
+  var ca = (G.step - G.lastCollect) * STEP;
+  elScore.style.transform = 'scale(' + (1 + 0.35 * Math.max(0, 1 - ca * 3)).toFixed(3) + ')';
+  elHint.style.opacity = (isDemo || G.run > 0) ? 0 : clamp(1 - (runT - 5) / 1.5, 0, 1);
+  if (falling && f > 0.6) {
+    elOver.style.display = 'flex';
+    elOver.style.opacity = clamp((f - 0.6) * 3, 0, 1);
+    elFinal.textContent = '★ ' + G.stars + (G.stars === 1 ? ' star' : ' stars') + '  ·  ' + Math.floor(G.dist) + ' m';
+  } else elOver.style.display = 'none';
+
+  renderer.render(scene, camera);
+}
+
+// ---------------------------------------------------------------- modes
+var mode = null, playG = null, demoG = null, demoT = 0, rafId = 0, lastNow = 0, acc = 0;
+var keys = {}, touchSteer = 0;
+
+function resize() {
+  var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+function parseT() {
+  var m = /[#&]t=([0-9]*\.?[0-9]+)/.exec(location.hash || '');
+  return m ? parseFloat(m[1]) : null;
+}
+function renderDemo(t) {
+  var target = Math.max(0, Math.round(t * 60));
+  if (!demoG || demoG.step > target) demoG = newGame(20261125);
+  while (demoG.step < target) demoStep(demoG);
+  draw(demoG, true);
+  window.__demoReady = target;
+}
+function steerInput() {
+  var s = ((keys.ArrowRight || keys.KeyD) ? 1 : 0) - ((keys.ArrowLeft || keys.KeyA) ? 1 : 0);
+  return s || touchSteer;
+}
+function tryRestart() {
+  if (mode === 'play' && playG && playG.state === 'fall' && playG.fallStep > 20) { playG.run++; resetRun(playG); }
+}
+function frame(now) {
+  rafId = requestAnimationFrame(frame);
+  var dt = Math.min(0.1, (now - lastNow) / 1000);
+  lastNow = now; acc += dt;
+  while (acc >= STEP) { stepGame(playG, steerInput()); acc -= STEP; }
+  draw(playG, false);
+}
+function boot() {
+  resize();
+  var t = parseT();
+  if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  if (t !== null && isFinite(t)) {
+    mode = 'demo'; demoT = t; renderDemo(t);
+  } else {
+    mode = 'play';
+    if (!playG) playG = newGame(Date.now() & 0x7fffffff);
+    lastNow = performance.now(); acc = 0;
+    rafId = requestAnimationFrame(frame);
+  }
+}
+
+window.addEventListener('keydown', function (e) {
+  if (e.code === 'Space' || e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') e.preventDefault();
+  keys[e.code] = true;
+  if (e.code === 'Space') tryRestart();
+});
+window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+window.addEventListener('blur', function () { keys = {}; touchSteer = 0; });
+function touch(e) {
+  if (!e.touches.length) { touchSteer = 0; return; }
+  touchSteer = e.touches[0].clientX < window.innerWidth / 2 ? -1 : 1;
+}
+window.addEventListener('touchstart', function (e) { tryRestart(); touch(e); }, { passive: true });
+window.addEventListener('touchmove', touch, { passive: true });
+window.addEventListener('touchend', touch, { passive: true });
+window.addEventListener('hashchange', boot);
+window.addEventListener('resize', function () { resize(); if (mode === 'demo') renderDemo(demoT); });
+
+boot();
+})();
+</script>
+</body>
+</html>
